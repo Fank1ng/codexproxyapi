@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Codex Proxy — Account Pool</title>
+<style>
+:root{--bg:#0f1117;--surface:#1a1d27;--border:#2a2d3a;--text:#e1e4eb;--muted:#8b8fa5;--accent:#6c8aff;--green:#4ade80;--red:#f87171;--amber:#fbbf24;--radius:8px}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;line-height:1.5}
+header{background:var(--surface);border-bottom:1px solid var(--border);padding:0 24px;display:flex;align-items:center;height:56px;gap:8px}
+header h1{font-size:18px;font-weight:600}
+header .dot{width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+nav{display:flex;gap:4px;padding:12px 24px;background:var(--surface);border-bottom:1px solid var(--border)}
+nav button{padding:8px 20px;border:none;border-radius:var(--radius);cursor:pointer;font-size:14px;background:transparent;color:var(--muted);transition:.15s}
+nav button:hover{color:var(--text);background:rgba(255,255,255,.05)}
+nav button.active{background:var(--accent);color:#fff}
+main{padding:24px;max-width:960px;margin:0 auto}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:16px}
+.card h3{font-size:15px;margin-bottom:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+.stat{background:var(--bg);border-radius:var(--radius);padding:16px;text-align:center}
+.stat .num{font-size:28px;font-weight:700}
+.stat .label{font-size:12px;color:var(--muted);margin-top:4px}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:10px 12px;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border)}
+td{padding:10px 12px;font-size:14px;border-bottom:1px solid var(--border)}
+.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}
+.badge-on{background:rgba(74,222,128,.15);color:var(--green)}
+.badge-off{background:rgba(248,113,113,.15);color:var(--red)}
+.badge-cool{background:rgba(251,191,36,.15);color:var(--amber)}
+.btn{padding:8px 16px;border:none;border-radius:var(--radius);cursor:pointer;font-size:13px;font-weight:500;transition:.15s;display:inline-flex;align-items:center;gap:6px}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{opacity:.85}
+.btn-danger{background:rgba(248,113,113,.15);color:var(--red)}
+.btn-danger:hover{background:rgba(248,113,113,.25)}
+.btn-sm{padding:4px 10px;font-size:12px}
+.btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--border)}
+.btn-ghost:hover{color:var(--text);border-color:var(--muted)}
+.flex{display:flex;gap:8px;align-items:center}
+.mb{margin-bottom:16px}
+.mr{margin-right:8px}
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center}
+.modal-overlay.show{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;min-width:480px;max-width:640px}
+.modal h3{margin-bottom:12px}
+.modal code{display:block;background:var(--bg);padding:16px;border-radius:var(--radius);font-size:14px;margin:12px 0;word-break:break-all;user-select:all}
+.progress-bar{width:100%;height:6px;background:var(--bg);border-radius:3px;overflow:hidden;margin-top:4px}
+.progress-fill{height:100%;border-radius:3px;transition:.3s}
+.progress-low{background:var(--accent)}
+.progress-mid{background:var(--amber)}
+.progress-high{background:var(--red)}
+.form-group{margin-bottom:14px}
+.form-group label{display:block;font-size:13px;color:var(--muted);margin-bottom:4px}
+.form-group input,.form-group select{width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:14px}
+.form-group input:focus{outline:none;border-color:var(--accent)}
+.toast{position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:var(--radius);font-size:14px;z-index:200;animation:slideUp .3s;max-width:360px}
+.toast-ok{background:#166534;color:var(--green);border:1px solid var(--green)}
+.toast-err{background:#7f1d1d;color:var(--red);border:1px solid var(--red)}
+@keyframes slideUp{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.empty{text-align:center;padding:40px;color:var(--muted)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="dot" id="status-dot"></div>
+  <h1>Codex Account Pool Proxy</h1>
+</header>
+
+<nav>
+  <button class="active" data-tab="dashboard">Dashboard</button>
+  <button data-tab="accounts">Accounts</button>
+  <button data-tab="settings">Settings</button>
+</nav>
+
+<main>
+<!-- ====== DASHBOARD ====== -->
+<section id="tab-dashboard">
+  <div class="card"><h3>Overview</h3>
+    <div class="stats">
+      <div class="stat"><div class="num" id="stat-total">—</div><div class="label">Total Accounts</div></div>
+      <div class="stat"><div class="num" id="stat-active">—</div><div class="label">Active</div></div>
+      <div class="stat"><div class="num" id="stat-limited">—</div><div class="label">Rate-Limited</div></div>
+      <div class="stat"><div class="num" id="stat-strategy">—</div><div class="label">Strategy</div></div>
+    </div>
+  </div>
+  <div class="card" id="quota-summary-card"><h3>Quota Summary</h3>
+    <div id="quota-summary" class="empty">Loading…</div>
+  </div>
+</section>
+
+<!-- ====== ACCOUNTS ====== -->
+<section id="tab-accounts" style="display:none">
+  <div class="flex mb">
+    <button class="btn btn-primary" onclick="openAddModal()">+ Add Account</button>
+    <button class="btn btn-ghost" onclick="scanAccounts()">&#x21bb; Rescan</button>
+  </div>
+  <div class="card">
+    <table>
+      <thead><tr><th>Name</th><th>Email</th><th>Status</th><th>5h Usage</th><th>7d Usage</th><th style="width:180px">Actions</th></tr></thead>
+      <tbody id="accounts-tbody"><tr><td colspan="6" class="empty">No accounts yet. Click "Add Account" to start.</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ====== SETTINGS ====== -->
+<section id="tab-settings" style="display:none">
+  <div class="card">
+    <h3>Proxy Configuration</h3>
+    <div class="form-group"><label>Port</label><input type="number" id="cfg-port" value="8800"></div>
+    <div class="form-group"><label>Rate Limit Cooldown (seconds)</label><input type="number" id="cfg-cooldown" value="60"></div>
+    <div class="form-group"><label>Rotation Strategy</label>
+      <select id="cfg-strategy">
+        <option value="round_robin">Round Robin</option>
+        <option value="least_used">Least Used</option>
+      </select>
+    </div>
+    <div class="form-group"><label>Max Retries</label><input type="number" id="cfg-retries" value="10"></div>
+    <div class="form-group"><label>Quota Refresh Interval (seconds)</label><input type="number" id="cfg-quota" value="300"></div>
+    <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+  </div>
+</section>
+</main>
+
+<!-- ====== ADD ACCOUNT MODAL ====== -->
+<div class="modal-overlay" id="add-modal">
+  <div class="modal">
+    <h3>Add New Account</h3>
+    <div class="form-group"><label>Account Name</label><input type="text" id="new-account-name" placeholder="e.g. account-b" style="width:100%"></div>
+    <button class="btn btn-primary mb" onclick="addAccount()">Generate Login Command</button>
+    <div id="command-area" style="display:none">
+      <p style="font-size:13px;color:var(--muted)">Run this command in your terminal, then close this window and click <strong>Rescan</strong>:</p>
+      <code id="login-command"></code>
+      <p style="font-size:12px;color:var(--amber)">This opens a browser for ChatGPT login. Use a <strong>different</strong> OpenAI account than your existing one.</p>
+    </div>
+    <div class="flex" style="justify-content:flex-end;margin-top:16px">
+      <button class="btn btn-ghost" onclick="closeAddModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let statusTimer = null;
+
+async function fetchJSON(url, opts = {}) {
+  try {
+    const r = await fetch(API + url, opts);
+    if (!r.ok) throw new Error(`${r.status}`);
+    return await r.json();
+  } catch (e) {
+    console.error(url, e);
+    return null;
+  }
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────
+document.querySelectorAll('nav button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const tab = btn.dataset.tab;
+    document.querySelectorAll('main > section').forEach(s => s.style.display = 'none');
+    document.getElementById('tab-' + tab).style.display = '';
+    if (tab === 'accounts') refreshAccounts();
+    if (tab === 'dashboard') refreshDashboard();
+    if (tab === 'settings') loadSettings();
+  });
+});
+
+// ── Dashboard ─────────────────────────────────────────────────────
+async function refreshDashboard() {
+  const status = await fetchJSON('/api/status');
+  if (status) {
+    document.getElementById('stat-total').textContent = status.total_accounts;
+    document.getElementById('stat-active').textContent = status.active_accounts;
+    document.getElementById('stat-limited').textContent = (status.total_accounts || 0) - (status.active_accounts || 0);
+    document.getElementById('stat-strategy').textContent = status.strategy;
+    document.getElementById('status-dot').style.background = status.running ? 'var(--green)' : 'var(--red)';
+  }
+
+  const quota = await fetchJSON('/api/quota');
+  const el = document.getElementById('quota-summary');
+  if (!quota || !Object.keys(quota).length) {
+    el.innerHTML = '<div class="empty">No quota data yet. Accounts without usage data will appear here.</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Account</th><th>5h Usage</th><th>5h Limit</th><th>7d Usage</th><th>7d Limit</th></tr></thead><tbody>';
+  for (const [name, data] of Object.entries(quota)) {
+    if (!data) { html += `<tr><td>${esc(name)}</td><td colspan="4" style="color:var(--muted)">no data</td></tr>`; continue; }
+    const d5h = data['5h_usage'] || data.five_hour_usage || 0;
+    const l5h = data['5h_limit'] || data.five_hour_limit || 100;
+    const d7d = data.weekly_usage || 0;
+    const l7d = data.weekly_limit || 100;
+    html += `<tr>
+      <td><strong>${esc(name)}</strong></td>
+      <td>${usageBar(d5h, l5h)} ${d5h}/${l5h}</td>
+      <td>${usageBar(d5h, l5h)}</td>
+      <td>${usageBar(d7d, l7d)} ${d7d}/${l7d}</td>
+      <td>${usageBar(d7d, l7d)}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+function usageBar(used, limit) {
+  const pct = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
+  let cls = 'progress-low';
+  if (pct > 80) cls = 'progress-high';
+  else if (pct > 50) cls = 'progress-mid';
+  return `<div class="progress-bar"><div class="progress-fill ${cls}" style="width:${pct}%"></div></div>`;
+}
+
+// ── Accounts ──────────────────────────────────────────────────────
+async function refreshAccounts() {
+  const accounts = await fetchJSON('/api/accounts');
+  const tbody = document.getElementById('accounts-tbody');
+  if (!accounts || !accounts.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">No accounts yet. Click "Add Account" to start.</td></tr>';
+    return;
+  }
+  const quota = await fetchJSON('/api/quota') || {};
+  tbody.innerHTML = accounts.map(a => {
+    let statusHTML = '';
+    if (a.rate_limited) statusHTML += `<span class="badge badge-cool mr">rate-limited</span>`;
+    statusHTML += a.enabled ? `<span class="badge badge-on">active</span>` : `<span class="badge badge-off">disabled</span>`;
+    const q = quota[a.name] || {};
+    const d5h = q['5h_usage'] || q.five_hour_usage || 0;
+    const l5h = q['5h_limit'] || q.five_hour_limit || '—';
+    const d7d = q.weekly_usage || 0;
+    const l7d = q.weekly_limit || '—';
+    return `<tr>
+      <td><strong>${esc(a.name)}</strong></td>
+      <td style="color:var(--muted)">${esc(a.email || '—')}</td>
+      <td>${statusHTML}</td>
+      <td>${usageBar(d5h, Number(l5h) || 100)} <small>${d5h}/${l5h}</small></td>
+      <td>${usageBar(d7d, Number(l7d) || 100)} <small>${d7d}/${l7d}</small></td>
+      <td class="flex">
+        <button class="btn btn-sm btn-ghost" onclick="toggleAccount('${esc(a.name)}')">${a.enabled ? 'Disable' : 'Enable'}</button>
+        <button class="btn btn-sm btn-ghost" onclick="refreshToken('${esc(a.name)}')">Refresh</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteAccount('${esc(a.name)}')">Del</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function toggleAccount(name) {
+  await fetchJSON(`/api/accounts/${encodeURIComponent(name)}/toggle`, { method: 'PUT' });
+  refreshAccounts();
+}
+
+async function refreshToken(name) {
+  toast('Refreshing token…');
+  const r = await fetchJSON(`/api/accounts/${encodeURIComponent(name)}/refresh`, { method: 'POST' });
+  if (r && r.refreshed) toast('Token refreshed', 'ok');
+  else toast('Token refresh failed', 'err');
+  refreshAccounts();
+}
+
+async function deleteAccount(name) {
+  if (!confirm(`Delete account "${name}"? This removes its auth tokens.`)) return;
+  await fetchJSON(`/api/accounts/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  refreshAccounts();
+}
+
+async function scanAccounts() {
+  toast('Scanning…');
+  await fetchJSON('/api/accounts/scan', { method: 'POST' });
+  refreshAccounts();
+  refreshDashboard();
+  toast('Scan complete', 'ok');
+}
+
+// ── Add Account Modal ─────────────────────────────────────────────
+function openAddModal() {
+  document.getElementById('add-modal').classList.add('show');
+  document.getElementById('command-area').style.display = 'none';
+  document.getElementById('new-account-name').value = '';
+}
+
+function closeAddModal() {
+  document.getElementById('add-modal').classList.remove('show');
+}
+
+async function addAccount() {
+  const name = document.getElementById('new-account-name').value.trim();
+  if (!name) { toast('Enter an account name', 'err'); return; }
+  const r = await fetchJSON('/api/accounts/add', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  if (r && r.command) {
+    document.getElementById('login-command').textContent = r.command;
+    document.getElementById('command-area').style.display = '';
+    toast('Command generated', 'ok');
+  } else {
+    toast(r?.error || 'Failed', 'err');
+  }
+}
+
+// ── Settings ──────────────────────────────────────────────────────
+async function loadSettings() {
+  const cfg = await fetchJSON('/api/config');
+  if (!cfg) return;
+  document.getElementById('cfg-port').value = cfg.port || 8800;
+  document.getElementById('cfg-cooldown').value = cfg.rate_limit_cooldown || 60;
+  document.getElementById('cfg-strategy').value = cfg.rotation_strategy || 'round_robin';
+  document.getElementById('cfg-retries').value = cfg.max_retries || 10;
+  document.getElementById('cfg-quota').value = cfg.quota_refresh_interval || 300;
+}
+
+async function saveSettings() {
+  const cfg = {
+    port: parseInt(document.getElementById('cfg-port').value) || 8800,
+    rate_limit_cooldown: parseInt(document.getElementById('cfg-cooldown').value) || 60,
+    rotation_strategy: document.getElementById('cfg-strategy').value,
+    max_retries: parseInt(document.getElementById('cfg-retries').value) || 10,
+    quota_refresh_interval: parseInt(document.getElementById('cfg-quota').value) || 300,
+  };
+  await fetchJSON('/api/config', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(cfg),
+  });
+  toast('Settings saved. Restart proxy to apply port change.', 'ok');
+}
+
+// ── Helpers ───────────────────────────────────────────────────────
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function toast(msg, type = 'ok') {
+  const el = document.createElement('div');
+  el.className = 'toast toast-' + type;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+// ── Init ──────────────────────────────────────────────────────────
+refreshDashboard();
+statusTimer = setInterval(refreshDashboard, 30000);
+</script>
+</body>
+</html>
