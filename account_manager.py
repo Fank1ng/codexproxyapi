@@ -42,7 +42,7 @@ class Account:
             self.access_token = tokens.get("access_token", "")
             self.refresh_token = tokens.get("refresh_token", "")
             self.email = self._decode_email(self.access_token)
-            self.account_id = tokens.get("account_id", "")
+            self.account_id = tokens.get("account_id", "") or self._decode_account_id(self.access_token)
             self.expires_at = self._decode_expiry(self.access_token)
             return bool(self.access_token)
         except Exception as e:
@@ -132,28 +132,36 @@ class Account:
         }
 
     @staticmethod
-    def _decode_email(token: str) -> str:
+    def _decode_claims(token: str) -> dict:
         try:
             payload = token.split(".")[1]
             payload += "=" * (-len(payload) % 4)
             import base64
-            claims = json.loads(base64.urlsafe_b64decode(payload))
-            return claims.get("email", "") or claims.get(
-                "https://api.openai.com/email", ""
-            )
+            return json.loads(base64.urlsafe_b64decode(payload))
         except Exception:
-            return ""
+            return {}
+
+    @staticmethod
+    def _decode_email(token: str) -> str:
+        claims = Account._decode_claims(token)
+        email = (
+            claims.get("email")
+            or claims.get("https://api.openai.com/profile", {}).get("email", "")
+        )
+        return email or ""
+
+    @staticmethod
+    def _decode_account_id(token: str) -> str:
+        claims = Account._decode_claims(token)
+        return (
+            claims.get("https://api.openai.com/auth", {}).get("chatgpt_account_id", "")
+            or claims.get("sub", "")
+        )
 
     @staticmethod
     def _decode_expiry(token: str) -> float:
-        try:
-            payload = token.split(".")[1]
-            payload += "=" * (-len(payload) % 4)
-            import base64
-            claims = json.loads(base64.urlsafe_b64decode(payload))
-            return claims.get("exp", 0)
-        except Exception:
-            return 0
+        claims = Account._decode_claims(token)
+        return claims.get("exp", 0)
 
 
 class AccountPool:

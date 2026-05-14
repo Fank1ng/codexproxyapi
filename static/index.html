@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Codex Proxy — Account Pool</title>
+<title>Codex 账号池代理管理</title>
 <style>
 :root{--bg:#0f1117;--surface:#1a1d27;--border:#2a2d3a;--text:#e1e4eb;--muted:#8b8fa5;--accent:#6c8aff;--green:#4ade80;--red:#f87171;--amber:#fbbf24;--radius:8px}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -68,41 +68,41 @@ td{padding:10px 12px;font-size:14px;border-bottom:1px solid var(--border)}
 
 <header>
   <div class="dot" id="status-dot"></div>
-  <h1>Codex Account Pool Proxy</h1>
+  <h1>Codex 账号池代理管理</h1>
 </header>
 
 <nav>
-  <button class="active" data-tab="dashboard">Dashboard</button>
-  <button data-tab="accounts">Accounts</button>
-  <button data-tab="settings">Settings</button>
+  <button class="active" data-tab="dashboard">仪表盘</button>
+  <button data-tab="accounts">账号管理</button>
+  <button data-tab="settings">设置</button>
 </nav>
 
 <main>
 <!-- ====== DASHBOARD ====== -->
 <section id="tab-dashboard">
-  <div class="card"><h3>Overview</h3>
+  <div class="card"><h3>概览</h3>
     <div class="stats">
-      <div class="stat"><div class="num" id="stat-total">—</div><div class="label">Total Accounts</div></div>
-      <div class="stat"><div class="num" id="stat-active">—</div><div class="label">Active</div></div>
-      <div class="stat"><div class="num" id="stat-limited">—</div><div class="label">Rate-Limited</div></div>
-      <div class="stat"><div class="num" id="stat-strategy">—</div><div class="label">Strategy</div></div>
+      <div class="stat"><div class="num" id="stat-total">—</div><div class="label">账号总数</div></div>
+      <div class="stat"><div class="num" id="stat-active">—</div><div class="label">活跃</div></div>
+      <div class="stat"><div class="num" id="stat-limited">—</div><div class="label">限流中</div></div>
+      <div class="stat"><div class="num" id="stat-strategy">—</div><div class="label">轮换策略</div></div>
     </div>
   </div>
-  <div class="card" id="quota-summary-card"><h3>Quota Summary</h3>
-    <div id="quota-summary" class="empty">Loading…</div>
+  <div class="card" id="quota-summary-card"><h3>配额总览</h3>
+    <div id="quota-summary" class="empty">加载中…</div>
   </div>
 </section>
 
 <!-- ====== ACCOUNTS ====== -->
 <section id="tab-accounts" style="display:none">
   <div class="flex mb">
-    <button class="btn btn-primary" onclick="openAddModal()">+ Add Account</button>
-    <button class="btn btn-ghost" onclick="scanAccounts()">&#x21bb; Rescan</button>
+    <button class="btn btn-primary" onclick="openAddModal()">+ 添加账号</button>
+    <button class="btn btn-ghost" onclick="scanAccounts()">&#x21bb; 重新扫描</button>
   </div>
   <div class="card">
     <table>
-      <thead><tr><th>Name</th><th>Email</th><th>Status</th><th>5h Usage</th><th>7d Usage</th><th style="width:180px">Actions</th></tr></thead>
-      <tbody id="accounts-tbody"><tr><td colspan="6" class="empty">No accounts yet. Click "Add Account" to start.</td></tr></tbody>
+      <thead><tr><th>名称</th><th>邮箱</th><th>状态</th><th>5小时用量</th><th>7天用量</th><th style="width:180px">操作</th></tr></thead>
+      <tbody id="accounts-tbody"><tr><td colspan="6" class="empty">还没有账号，点击"添加账号"开始。</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -110,18 +110,18 @@ td{padding:10px 12px;font-size:14px;border-bottom:1px solid var(--border)}
 <!-- ====== SETTINGS ====== -->
 <section id="tab-settings" style="display:none">
   <div class="card">
-    <h3>Proxy Configuration</h3>
-    <div class="form-group"><label>Port</label><input type="number" id="cfg-port" value="8800"></div>
-    <div class="form-group"><label>Rate Limit Cooldown (seconds)</label><input type="number" id="cfg-cooldown" value="60"></div>
-    <div class="form-group"><label>Rotation Strategy</label>
+    <h3>代理配置</h3>
+    <div class="form-group"><label>端口</label><input type="number" id="cfg-port" value="8800"></div>
+    <div class="form-group"><label>限流冷却时间（秒）</label><input type="number" id="cfg-cooldown" value="60"></div>
+    <div class="form-group"><label>轮换策略</label>
       <select id="cfg-strategy">
-        <option value="round_robin">Round Robin</option>
-        <option value="least_used">Least Used</option>
+        <option value="round_robin">轮询</option>
+        <option value="least_used">最少使用</option>
       </select>
     </div>
-    <div class="form-group"><label>Max Retries</label><input type="number" id="cfg-retries" value="10"></div>
-    <div class="form-group"><label>Quota Refresh Interval (seconds)</label><input type="number" id="cfg-quota" value="300"></div>
-    <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+    <div class="form-group"><label>最大重试次数</label><input type="number" id="cfg-retries" value="10"></div>
+    <div class="form-group"><label>配额刷新间隔（秒）</label><input type="number" id="cfg-quota" value="300"></div>
+    <button class="btn btn-primary" onclick="saveSettings()">保存设置</button>
   </div>
 </section>
 </main>
@@ -129,16 +129,16 @@ td{padding:10px 12px;font-size:14px;border-bottom:1px solid var(--border)}
 <!-- ====== ADD ACCOUNT MODAL ====== -->
 <div class="modal-overlay" id="add-modal">
   <div class="modal">
-    <h3>Add New Account</h3>
-    <div class="form-group"><label>Account Name</label><input type="text" id="new-account-name" placeholder="e.g. account-b" style="width:100%"></div>
-    <button class="btn btn-primary mb" onclick="addAccount()">Generate Login Command</button>
+    <h3>添加新账号</h3>
+    <div class="form-group"><label>账号名称</label><input type="text" id="new-account-name" placeholder="例如：account-b" style="width:100%"></div>
+    <button class="btn btn-primary mb" onclick="addAccount()">生成登录命令</button>
     <div id="command-area" style="display:none">
-      <p style="font-size:13px;color:var(--muted)">Run this command in your terminal, then close this window and click <strong>Rescan</strong>:</p>
+      <p style="font-size:13px;color:var(--muted)">在终端中执行以下命令，完成后点 <strong>重新扫描</strong>：</p>
       <code id="login-command"></code>
-      <p style="font-size:12px;color:var(--amber)">This opens a browser for ChatGPT login. Use a <strong>different</strong> OpenAI account than your existing one.</p>
+      <p style="font-size:12px;color:var(--amber)">这将打开浏览器进行 ChatGPT 登录。请使用<strong>不同的</strong> OpenAI 账号。</p>
     </div>
     <div class="flex" style="justify-content:flex-end;margin-top:16px">
-      <button class="btn btn-ghost" onclick="closeAddModal()">Close</button>
+      <button class="btn btn-ghost" onclick="closeAddModal()">关闭</button>
     </div>
   </div>
 </div>
@@ -186,12 +186,12 @@ async function refreshDashboard() {
   const quota = await fetchJSON('/api/quota');
   const el = document.getElementById('quota-summary');
   if (!quota || !Object.keys(quota).length) {
-    el.innerHTML = '<div class="empty">No quota data yet. Accounts without usage data will appear here.</div>';
+    el.innerHTML = '<div class="empty">暂无配额数据，使用 Codex 后将在此显示用量。</div>';
     return;
   }
-  let html = '<table><thead><tr><th>Account</th><th>5h Usage</th><th>5h Limit</th><th>7d Usage</th><th>7d Limit</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>账号</th><th>5小时用量</th><th>5小时上限</th><th>7天用量</th><th>7天上限</th></tr></thead><tbody>';
   for (const [name, data] of Object.entries(quota)) {
-    if (!data) { html += `<tr><td>${esc(name)}</td><td colspan="4" style="color:var(--muted)">no data</td></tr>`; continue; }
+    if (!data) { html += `<tr><td>${esc(name)}</td><td colspan="4" style="color:var(--muted)">暂无数据</td></tr>`; continue; }
     const d5h = data['5h_usage'] || data.five_hour_usage || 0;
     const l5h = data['5h_limit'] || data.five_hour_limit || 100;
     const d7d = data.weekly_usage || 0;
@@ -221,14 +221,14 @@ async function refreshAccounts() {
   const accounts = await fetchJSON('/api/accounts');
   const tbody = document.getElementById('accounts-tbody');
   if (!accounts || !accounts.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty">No accounts yet. Click "Add Account" to start.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">还没有账号，点击"添加账号"开始。</td></tr>';
     return;
   }
   const quota = await fetchJSON('/api/quota') || {};
   tbody.innerHTML = accounts.map(a => {
     let statusHTML = '';
-    if (a.rate_limited) statusHTML += `<span class="badge badge-cool mr">rate-limited</span>`;
-    statusHTML += a.enabled ? `<span class="badge badge-on">active</span>` : `<span class="badge badge-off">disabled</span>`;
+    if (a.rate_limited) statusHTML += `<span class="badge badge-cool mr">限流中</span>`;
+    statusHTML += a.enabled ? `<span class="badge badge-on">活跃</span>` : `<span class="badge badge-off">已禁用</span>`;
     const q = quota[a.name] || {};
     const d5h = q['5h_usage'] || q.five_hour_usage || 0;
     const l5h = q['5h_limit'] || q.five_hour_limit || '—';
@@ -241,9 +241,9 @@ async function refreshAccounts() {
       <td>${usageBar(d5h, Number(l5h) || 100)} <small>${d5h}/${l5h}</small></td>
       <td>${usageBar(d7d, Number(l7d) || 100)} <small>${d7d}/${l7d}</small></td>
       <td class="flex">
-        <button class="btn btn-sm btn-ghost" onclick="toggleAccount('${esc(a.name)}')">${a.enabled ? 'Disable' : 'Enable'}</button>
-        <button class="btn btn-sm btn-ghost" onclick="refreshToken('${esc(a.name)}')">Refresh</button>
-        <button class="btn btn-sm btn-danger" onclick="deleteAccount('${esc(a.name)}')">Del</button>
+        <button class="btn btn-sm btn-ghost" onclick="toggleAccount('${esc(a.name)}')">${a.enabled ? '禁用' : '启用'}</button>
+        <button class="btn btn-sm btn-ghost" onclick="refreshToken('${esc(a.name)}')">刷新令牌</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteAccount('${esc(a.name)}')">删除</button>
       </td>
     </tr>`;
   }).join('');
@@ -255,25 +255,25 @@ async function toggleAccount(name) {
 }
 
 async function refreshToken(name) {
-  toast('Refreshing token…');
+  toast('正在刷新令牌…');
   const r = await fetchJSON(`/api/accounts/${encodeURIComponent(name)}/refresh`, { method: 'POST' });
-  if (r && r.refreshed) toast('Token refreshed', 'ok');
-  else toast('Token refresh failed', 'err');
+  if (r && r.refreshed) toast('令牌刷新成功', 'ok');
+  else toast('令牌刷新失败', 'err');
   refreshAccounts();
 }
 
 async function deleteAccount(name) {
-  if (!confirm(`Delete account "${name}"? This removes its auth tokens.`)) return;
+  if (!confirm(`确定删除账号"${name}"？这将移除其所有认证令牌。`)) return;
   await fetchJSON(`/api/accounts/${encodeURIComponent(name)}`, { method: 'DELETE' });
   refreshAccounts();
 }
 
 async function scanAccounts() {
-  toast('Scanning…');
+  toast('正在扫描…');
   await fetchJSON('/api/accounts/scan', { method: 'POST' });
   refreshAccounts();
   refreshDashboard();
-  toast('Scan complete', 'ok');
+  toast('扫描完成', 'ok');
 }
 
 // ── Add Account Modal ─────────────────────────────────────────────
@@ -289,7 +289,7 @@ function closeAddModal() {
 
 async function addAccount() {
   const name = document.getElementById('new-account-name').value.trim();
-  if (!name) { toast('Enter an account name', 'err'); return; }
+  if (!name) { toast('请输入账号名称', 'err'); return; }
   const r = await fetchJSON('/api/accounts/add', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -298,9 +298,9 @@ async function addAccount() {
   if (r && r.command) {
     document.getElementById('login-command').textContent = r.command;
     document.getElementById('command-area').style.display = '';
-    toast('Command generated', 'ok');
+    toast('命令已生成', 'ok');
   } else {
-    toast(r?.error || 'Failed', 'err');
+    toast(r?.error || '操作失败', 'err');
   }
 }
 
@@ -328,7 +328,7 @@ async function saveSettings() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(cfg),
   });
-  toast('Settings saved. Restart proxy to apply port change.', 'ok');
+  toast('设置已保存，重启代理后端口修改生效。', 'ok');
 }
 
 // ── Helpers ───────────────────────────────────────────────────────
