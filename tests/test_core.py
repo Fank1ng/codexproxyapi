@@ -329,8 +329,6 @@ class QuotaTrackerTests(unittest.TestCase):
     def test_refresh_once_writes_latest_usage_atomically(self):
         old_accounts_dir = quota_tracker.ACCOUNTS_DIR
         root = Path(tempfile.mkdtemp())
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         account = Account("a", root / "a" / "auth.json")
         account.enabled = True
         account.access_token = "token"
@@ -338,7 +336,7 @@ class QuotaTrackerTests(unittest.TestCase):
         pool.accounts = [account]
         quota_tracker.ACCOUNTS_DIR = root
         try:
-            async def fake_fetch(acct):
+            async def fake_fetch(acct, session):
                 return {
                     "rate_limit": {
                         "primary_window": {
@@ -348,8 +346,7 @@ class QuotaTrackerTests(unittest.TestCase):
                 }
 
             with mock.patch("quota_tracker._fetch_usage", side_effect=fake_fetch):
-                with mock.patch("quota_tracker.asyncio.sleep", return_value=None):
-                    result = loop.run_until_complete(quota_tracker.refresh_once(pool))
+                result = asyncio.run(quota_tracker.refresh_once(pool))
             quota_file = root / "a" / "quota.json"
             data = json.loads(quota_file.read_text())
             self.assertTrue(result["a"]["refreshed"])
@@ -358,8 +355,62 @@ class QuotaTrackerTests(unittest.TestCase):
             self.assertFalse((root / "a" / "quota.json.tmp").exists())
         finally:
             quota_tracker.ACCOUNTS_DIR = old_accounts_dir
-            loop.close()
-            asyncio.set_event_loop(asyncio.new_event_loop())
+
+    def test_refresh_once_runs_enabled_accounts_concurrently(self):
+        old_accounts_dir = quota_tracker.ACCOUNTS_DIR
+        root = Path(tempfile.mkdtemp())
+        pool = AccountPool()
+        for name in ("a", "b"):
+            account = Account(name, root / name / "auth.json")
+            account.enabled = True
+            account.access_token = f"token-{name}"
+            pool.accounts.append(account)
+        active = 0
+        peak = 0
+        quota_tracker.ACCOUNTS_DIR = root
+        try:
+            async def fake_fetch(acct, session):
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
+                await asyncio.sleep(0.01)
+                active -= 1
+                return {
+                    "rate_limit": {
+                        "primary_window": {
+                            "used_percent": 20,
+                            "reset_at": 123,
+                        },
+                        "secondary_window": {
+                            "used_percent": 30,
+                            "reset_at": 456,
+                        },
+                    },
+                }
+
+            with mock.patch("quota_tracker._fetch_usage", side_effect=fake_fetch):
+                result = asyncio.run(quota_tracker.refresh_once(pool))
+            self.assertEqual(peak, 2)
+            self.assertTrue(result["a"]["refreshed"])
+            self.assertTrue(result["b"]["refreshed"])
+        finally:
+            quota_tracker.ACCOUNTS_DIR = old_accounts_dir
+
+    def test_refresh_once_reports_timeout(self):
+        root = Path(tempfile.mkdtemp())
+        account = Account("a", root / "a" / "auth.json")
+        account.enabled = True
+        account.access_token = "token"
+        pool = AccountPool()
+        pool.accounts = [account]
+
+        async def fake_fetch(acct, session):
+            raise asyncio.TimeoutError()
+
+        with mock.patch("quota_tracker._fetch_usage", side_effect=fake_fetch):
+            result = asyncio.run(quota_tracker.refresh_once(pool))
+        self.assertFalse(result["a"]["refreshed"])
+        self.assertEqual(result["a"]["error"], "timeout")
 
 
 class ProxyCoreTests(unittest.TestCase):

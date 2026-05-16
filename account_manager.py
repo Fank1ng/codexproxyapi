@@ -56,7 +56,7 @@ class Account:
         self.cooldown_reason: str = ""
         self.enabled: bool = True
         self.auth_error: str = ""
-        self._refresh_lock = asyncio.Lock()
+        self._refresh_lock: Optional[asyncio.Lock] = None
 
     def load(self) -> bool:
         """Load tokens from auth.json. Returns False if file missing or invalid."""
@@ -133,6 +133,8 @@ class Account:
 
     async def refresh(self) -> bool:
         """Refresh the OAuth token. Returns False on failure."""
+        if self._refresh_lock is None:
+            self._refresh_lock = asyncio.Lock()
         async with self._refresh_lock:
             if not self.refresh_token:
                 logger.warning(f"Account {self.name}: no refresh token")

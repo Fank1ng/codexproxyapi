@@ -16,7 +16,7 @@ USAGE_URL = "https://chatgpt.com/backend-api/codex/usage"
 logger = logging.getLogger(__name__)
 
 
-async def _fetch_usage(account) -> Optional[dict]:
+async def _fetch_usage(account, session: aiohttp.ClientSession) -> Optional[dict]:
     if not account.access_token:
         return None
     headers = {
@@ -26,18 +26,19 @@ async def _fetch_usage(account) -> Optional[dict]:
         "Origin": "https://chatgpt.com",
     }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                USAGE_URL,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                if resp.status != 200:
-                    logger.debug(
-                        f"Account {account.name}: usage API returned {resp.status}"
-                    )
-                    return None
-                return await resp.json()
+        async with session.get(
+            USAGE_URL,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as resp:
+            if resp.status != 200:
+                logger.debug(
+                    f"Account {account.name}: usage API returned {resp.status}"
+                )
+                return None
+            return await resp.json()
+    except asyncio.TimeoutError:
+        raise
     except Exception as e:
         logger.debug(f"Account {account.name}: usage fetch error: {e}")
         return None
@@ -49,12 +50,14 @@ async def _run_once(pool: AccountPool) -> None:
 
 async def refresh_once(pool: AccountPool) -> dict:
     """Fetch and persist quota data for all enabled accounts once."""
-    result = {}
-    for acct in pool.accounts:
+    async def refresh_account(acct, session):
         if not acct.enabled:
-            result[acct.name] = {"refreshed": False, "skipped": "disabled"}
-            continue
-        data = await _fetch_usage(acct)
+            return acct.name, {"refreshed": False, "skipped": "disabled"}
+        try:
+            data = await _fetch_usage(acct, session)
+        except asyncio.TimeoutError:
+            logger.debug(f"Account {acct.name}: usage fetch timed out")
+            return acct.name, {"refreshed": False, "error": "timeout"}
         if data:
             quota_file = ACCOUNTS_DIR / acct.name / "quota.json"
             data["_fetched_at"] = time.time()
@@ -65,12 +68,14 @@ async def refresh_once(pool: AccountPool) -> dict:
                 f.write("\n")
             tmp_file.replace(quota_file)
             logger.debug(f"Account {acct.name}: quota updated")
-            result[acct.name] = {"refreshed": True, "fetched_at": data["_fetched_at"]}
-        else:
-            result[acct.name] = {"refreshed": False, "error": "usage_unavailable"}
-        # Small delay between accounts to avoid triggering rate limits
-        await asyncio.sleep(1)
-    return result
+            return acct.name, {"refreshed": True, "fetched_at": data["_fetched_at"]}
+        return acct.name, {"refreshed": False, "error": "usage_unavailable"}
+
+    async with aiohttp.ClientSession() as session:
+        pairs = await asyncio.gather(
+            *(refresh_account(acct, session) for acct in pool.accounts)
+        )
+    return {name: item for name, item in pairs}
 
 
 async def run(pool: AccountPool) -> None:

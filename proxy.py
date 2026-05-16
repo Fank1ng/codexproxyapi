@@ -353,10 +353,12 @@ async def api_quota(request: web.Request) -> web.Response:
 
 async def api_quota_refresh(request: web.Request) -> web.Response:
     """POST /api/quota/refresh — fetch fresh quota data and return it."""
+    started = time.monotonic()
     result = await refresh_quota_once(pool)
     return web.json_response({
         "refreshed": any(item.get("refreshed") for item in result.values()),
         "accounts": result,
+        "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
     })
 
 

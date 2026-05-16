@@ -245,8 +245,8 @@ static NSString *CPRelativeTime(id epochValue) {
 
     NSView *statusCard = [self cardView];
     statusCard.translatesAutoresizingMaskIntoConstraints = NO;
-    [statusCard.widthAnchor constraintEqualToConstant:90].active = YES;
-    [statusCard.heightAnchor constraintEqualToConstant:64].active = YES;
+    [statusCard.widthAnchor constraintEqualToConstant:102].active = YES;
+    [statusCard.heightAnchor constraintEqualToConstant:66].active = YES;
     NSStackView *statusStack = [[NSStackView alloc] init];
     statusStack.orientation = NSUserInterfaceLayoutOrientationVertical;
     statusStack.spacing = 4;
@@ -261,7 +261,7 @@ static NSString *CPRelativeTime(id epochValue) {
     [row addArrangedSubview:[self statusDotWithColor:NSColor.systemGrayColor]];
     [row addArrangedSubview:[self labelWithText:@"后台服务" font:[NSFont systemFontOfSize:10 weight:NSFontWeightSemibold] color:NSColor.labelColor]];
     [statusStack addArrangedSubview:row];
-    self.sidebarStatusLabel = [self labelWithText:@"正在读取状态..." font:[NSFont systemFontOfSize:9 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor];
+    self.sidebarStatusLabel = [self labelWithText:@"读取中..." font:[NSFont systemFontOfSize:9 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor];
     self.sidebarStatusLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     [statusStack addArrangedSubview:self.sidebarStatusLabel];
     [self.sidebarStack addArrangedSubview:statusCard];
@@ -278,28 +278,29 @@ static NSString *CPRelativeTime(id epochValue) {
     [mainView addSubview:rootStack];
     [self pinView:rootStack toView:mainView insets:NSEdgeInsetsMake(12, 16, 10, 16)];
 
-    NSStackView *header = [[NSStackView alloc] init];
-    header.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    header.alignment = NSLayoutAttributeCenterY;
-    header.spacing = 10;
+    NSView *header = [[NSView alloc] init];
     header.translatesAutoresizingMaskIntoConstraints = NO;
 
     self.titleLabel = [self labelWithText:@"账号池代理" font:[NSFont systemFontOfSize:23 weight:NSFontWeightBold] color:NSColor.labelColor];
     self.subtitleLabel = [self labelWithText:@"正在读取本机代理状态..." font:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor];
 
-    NSView *headerFlex = [[NSView alloc] init];
-    headerFlex.translatesAutoresizingMaskIntoConstraints = NO;
-    [header addArrangedSubview:headerFlex];
-    [headerFlex.widthAnchor constraintGreaterThanOrEqualToConstant:1].active = YES;
-
     self.toolbarStack = [[NSStackView alloc] init];
     self.toolbarStack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     self.toolbarStack.spacing = 6;
+    self.toolbarStack.alignment = NSLayoutAttributeCenterY;
+    self.toolbarStack.translatesAutoresizingMaskIntoConstraints = NO;
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"刷新" symbol:@"arrow.clockwise" selector:@selector(refreshSnapshots:) primary:NO]];
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"启动/修复" symbol:@"play.circle.fill" selector:@selector(repairAction:) primary:YES]];
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"打开 Web" symbol:@"safari" selector:@selector(openWebAction:) primary:NO]];
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"打开 Codex" symbol:@"arrow.up.forward.app" selector:@selector(openCodexAction:) primary:NO]];
-    [header addArrangedSubview:self.toolbarStack];
+    [header addSubview:self.toolbarStack];
+    [NSLayoutConstraint activateConstraints:@[
+        [header.heightAnchor constraintEqualToConstant:30],
+        [self.toolbarStack.centerXAnchor constraintEqualToAnchor:header.centerXAnchor],
+        [self.toolbarStack.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
+        [self.toolbarStack.leadingAnchor constraintGreaterThanOrEqualToAnchor:header.leadingAnchor],
+        [self.toolbarStack.trailingAnchor constraintLessThanOrEqualToAnchor:header.trailingAnchor],
+    ]];
     [rootStack addArrangedSubview:header];
 
     [self addDividerToStack:rootStack top:8 bottom:8];
@@ -456,6 +457,7 @@ static NSString *CPRelativeTime(id epochValue) {
     [header addArrangedSubview:[self labelWithText:@"账号列表" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
     NSView *flex = [[NSView alloc] init];
     [header addArrangedSubview:flex];
+    [header addArrangedSubview:[self smallButtonWithTitle:@"额度" symbol:@"chart.bar" selector:@selector(refreshQuotaAction:)]];
     [header addArrangedSubview:[self smallButtonWithTitle:@"扫描" symbol:@"arrow.triangle.2.circlepath" selector:@selector(scanAccountsAction:)]];
     [header addArrangedSubview:[self smallButtonWithTitle:@"登录" symbol:@"plus" selector:@selector(startLoginAction:)]];
     [header addArrangedSubview:[self smallButtonWithTitle:@"导入" symbol:@"square.and.arrow.down" selector:@selector(importCurrentAction:)]];
@@ -479,10 +481,10 @@ static NSString *CPRelativeTime(id epochValue) {
     }
 
     NSArray<NSDictionary *> *columns = @[
-        @{@"id": @"name", @"title": @"名称", @"width": @90},
-        @{@"id": @"state", @"title": @"状态", @"width": @90},
-        @{@"id": @"quota", @"title": @"5h", @"width": @84},
-        @{@"id": @"weekly", @"title": @"7d", @"width": @84},
+        @{@"id": @"name", @"title": @"名称", @"width": @74},
+        @{@"id": @"state", @"title": @"状态", @"width": @72},
+        @{@"id": @"quota", @"title": @"5h", @"width": @54},
+        @{@"id": @"weekly", @"title": @"7d", @"width": @54},
     ];
     for (NSDictionary *spec in columns) {
         NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:spec[@"id"]];
@@ -492,7 +494,7 @@ static NSString *CPRelativeTime(id epochValue) {
         column.resizingMask = NSTableColumnAutoresizingMask;
         [self.accountTable addTableColumn:column];
     }
-    self.accountTable.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
+    self.accountTable.columnAutoresizingStyle = NSTableViewNoColumnAutoresizing;
     scroll.documentView = self.accountTable;
     [stack addArrangedSubview:scroll];
     [scroll.heightAnchor constraintGreaterThanOrEqualToConstant:height - 64].active = YES;
@@ -882,9 +884,8 @@ static NSString *CPRelativeTime(id epochValue) {
         [content.topAnchor constraintEqualToAnchor:container.topAnchor],
         [content.bottomAnchor constraintEqualToAnchor:container.bottomAnchor],
         [content.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
+        [content.widthAnchor constraintEqualToConstant:402],
         [content.widthAnchor constraintLessThanOrEqualToAnchor:container.widthAnchor],
-    [content.widthAnchor constraintLessThanOrEqualToConstant:402],
-    [content.widthAnchor constraintGreaterThanOrEqualToConstant:360],
     ]];
     return container;
 }
@@ -1124,15 +1125,43 @@ static NSString *CPRelativeTime(id epochValue) {
 - (void)refreshQuotaAction:(id)sender {
     if (!CPBool(self.statusSnapshot[@"running"])) {
         [self appendLog:@"代理离线，无法主动刷新远端额度；已显示本地账号状态。"];
+        self.footerStatusLabel.stringValue = @"代理离线，无法刷新额度";
         return;
     }
     [self setBusy:YES message:@"正在刷新额度..."];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSDictionary *result = [self fetchJSONPath:@"/api/quota/refresh" method:@"POST" timeout:45.0];
+        NSDictionary *result = [self fetchJSONPath:@"/api/quota/refresh" method:@"POST" timeout:12.0];
+        id remoteStatus = [self fetchJSONPath:@"/api/status" method:@"GET" timeout:2.0];
+        id remoteAccounts = [self fetchJSONPath:@"/api/accounts" method:@"GET" timeout:2.0];
+        id remoteQuota = [self fetchJSONPath:@"/api/quota" method:@"GET" timeout:2.0];
         dispatch_async(dispatch_get_main_queue(), ^{
+            NSDictionary *accounts = CPDict(result[@"accounts"]);
+            NSInteger refreshed = 0;
+            NSInteger failed = 0;
+            for (id key in accounts) {
+                NSDictionary *item = CPDict(accounts[key]);
+                if (CPBool(item[@"refreshed"])) {
+                    refreshed += 1;
+                } else {
+                    failed += 1;
+                }
+            }
+            NSString *message = result
+                ? [NSString stringWithFormat:@"额度刷新完成：%ld 成功 / %ld 失败", (long)refreshed, (long)failed]
+                : @"额度刷新失败：代理无响应或请求超时";
             [self appendLog:[NSString stringWithFormat:@"刷新额度\n%@", CPPrettyJSON(result ?: @{@"error": @"request failed"})]];
-            [self setBusy:NO message:@"额度刷新完成"];
-            [self refreshSnapshots:nil];
+            if ([remoteStatus isKindOfClass:NSDictionary.class]) {
+                self.statusSnapshot = remoteStatus;
+            }
+            if ([remoteAccounts isKindOfClass:NSArray.class]) {
+                self.accounts = remoteAccounts;
+            }
+            if ([remoteQuota isKindOfClass:NSDictionary.class]) {
+                self.quotaSnapshot = remoteQuota;
+            }
+            [self updateStatusViews];
+            [self renderActiveSection];
+            [self setBusy:NO message:message];
         });
     });
 }
@@ -1144,7 +1173,7 @@ static NSString *CPRelativeTime(id epochValue) {
                           CPDisplayString(self.statusSnapshot[@"active_accounts"]),
                           CPDisplayString(self.statusSnapshot[@"total_accounts"])];
     self.subtitleLabel.stringValue = [NSString stringWithFormat:@"%@ · %@ · %@", online, accounts, [self codexModeDetail]];
-    self.sidebarStatusLabel.stringValue = [NSString stringWithFormat:@"%@ · %@/%@",
+    self.sidebarStatusLabel.stringValue = [NSString stringWithFormat:@"%@ · %@/%@ 可用",
                                            running ? @"在线" : @"离线",
                                            CPDisplayString(self.statusSnapshot[@"active_accounts"]),
                                            CPDisplayString(self.statusSnapshot[@"total_accounts"])];
@@ -1701,11 +1730,11 @@ static NSString *CPRelativeTime(id epochValue) {
         [header addArrangedSubview:[self labelWithText:@"选中账号" font:[NSFont systemFontOfSize:15 weight:NSFontWeightBold] color:NSColor.labelColor]];
         [self.inspectorStack addArrangedSubview:header];
 
-        NSString *summary = [NSString stringWithFormat:@"%@ · %@ · 5h%@ · 7d%@",
+        NSString *summary = [NSString stringWithFormat:@"%@ · %@ · %@ · %@",
                              name,
                              [self stateLabelForAccount:account],
-                             [self quotaFetchedTextForAccountName:CPString(account[@"name"])],
-                             [self quotaFetchedTextForAccountName:CPString(account[@"name"])]];
+                             [self quotaResetTextForAccountName:CPString(account[@"name"]) weekly:NO],
+                             [self quotaResetTextForAccountName:CPString(account[@"name"]) weekly:YES]];
         NSTextField *summaryLabel = [self labelWithText:summary font:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor];
         summaryLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
         [self.inspectorStack addArrangedSubview:summaryLabel];
@@ -1815,6 +1844,28 @@ static NSString *CPRelativeTime(id epochValue) {
     NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
     formatter.dateFormat = @"MM-dd HH:mm";
     return [NSString stringWithFormat:@"刷新 %@", [formatter stringFromDate:date] ?: @"-"];
+}
+
+- (NSString *)quotaResetTextForAccountName:(NSString *)name weekly:(BOOL)weekly {
+    NSString *prefix = weekly ? @"7d" : @"5h";
+    NSDictionary *quota = CPDict(self.quotaSnapshot[name]);
+    NSDictionary *rateLimit = CPDict(quota[@"rate_limit"]);
+    NSDictionary *window = CPDict(rateLimit[weekly ? @"secondary_window" : @"primary_window"]);
+    NSTimeInterval resetAt = CPDouble(window[@"reset_at"]);
+    if (resetAt <= 0) {
+        NSTimeInterval fetchedAt = CPDouble(quota[@"_fetched_at"]);
+        NSTimeInterval resetAfter = CPDouble(window[@"reset_after_seconds"]);
+        if (fetchedAt > 0 && resetAfter > 0) {
+            resetAt = fetchedAt + resetAfter;
+        }
+    }
+    if (resetAt <= 0) {
+        return [NSString stringWithFormat:@"%@未刷新", prefix];
+    }
+    NSDate *date = [NSDate dateWithTimeIntervalSince1970:resetAt];
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    formatter.dateFormat = @"MM-dd HH:mm";
+    return [NSString stringWithFormat:@"%@刷新 %@", prefix, [formatter stringFromDate:date] ?: @"-"];
 }
 
 - (NSString *)requestTimeText:(id)value {
