@@ -6,11 +6,17 @@ APP="$ROOT/Codex Proxy Control.app"
 RESOURCES="$APP/Contents/Resources"
 RUNTIME="$RESOURCES/runtime"
 VENDOR="$RUNTIME/vendor"
+APP_ICON="$ROOT/static/icons/AppIcon.icns"
 PYTHON="${PYTHON:-/usr/bin/python3}"
 PYTHON_FRAMEWORK="${PYTHON_FRAMEWORK:-/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework}"
 SIGNED_APP="${SIGNED_APP:-/private/tmp/Codex Proxy Control.app}"
 
 mkdir -p "$APP/Contents/MacOS" "$RESOURCES" "$RUNTIME" "$VENDOR"
+
+if [ ! -f "$APP_ICON" ]; then
+  echo "Missing app icon: $APP_ICON" >&2
+  exit 1
+fi
 
 if [ -f "$APP/Contents/MacOS/Codex Proxy Control" ] && file "$APP/Contents/MacOS/Codex Proxy Control" | grep -q "shell script"; then
   cp "$APP/Contents/MacOS/Codex Proxy Control" "$RESOURCES/fallback_menu.zsh"
@@ -36,6 +42,38 @@ done
 
 rm -rf "$RUNTIME/static"
 cp -R "$ROOT/static" "$RUNTIME/static"
+cp "$APP_ICON" "$RESOURCES/AppIcon.icns"
+
+cat > "$APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>zh_CN</string>
+  <key>CFBundleExecutable</key>
+  <string>Codex Proxy Control</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.fank1ng.codexproxycontrol</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>Codex Proxy Control</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.4.3</string>
+  <key>CFBundleVersion</key>
+  <string>0.4.3</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>11.0</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+</dict>
+</plist>
+PLIST
 
 if [ -d "$PYTHON_FRAMEWORK" ]; then
   rm -rf "$RUNTIME/python"

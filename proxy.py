@@ -599,6 +599,7 @@ def create_app() -> web.Application:
     # Web UI
     app.router.add_get("/app", serve_ui)
     app.router.add_get("/app/", serve_ui)
+    app.router.add_static("/static/", STATIC_DIR, name="static")
 
     # Proxy — catch all other paths
     app.router.add_route("*", "/{tail:.*}", proxy_handler)

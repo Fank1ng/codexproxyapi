@@ -219,11 +219,8 @@ static NSString *CPRelativeTime(id epochValue) {
     [sidebar addSubview:self.sidebarStack];
     [self pinView:self.sidebarStack toView:sidebar insets:NSEdgeInsetsMake(16, 8, 12, 8)];
 
-    NSTextField *eyebrow = [self labelWithText:@"CODEX PROXY" font:[NSFont systemFontOfSize:9 weight:NSFontWeightMedium] color:NSColor.secondaryLabelColor];
-    NSTextField *title = [self labelWithText:@"控制台" font:[NSFont systemFontOfSize:20 weight:NSFontWeightBold] color:NSColor.labelColor];
-    [self.sidebarStack addArrangedSubview:eyebrow];
-    [self.sidebarStack addArrangedSubview:title];
-    [self addSpacerToStack:self.sidebarStack height:12];
+    [self.sidebarStack addArrangedSubview:[self sidebarBrandIconView]];
+    [self addSpacerToStack:self.sidebarStack height:10];
 
     NSArray<NSDictionary *> *items = @[
         @{@"id": @"dashboard", @"title": @"总览", @"symbol": @"gauge"},
@@ -372,7 +369,7 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (void)renderLogsSection {
-    [self.contentStack addArrangedSubview:[self constrainedContentView:[self recentRequestsCard]]];
+    [self.contentStack addArrangedSubview:[self constrainedContentView:[self recentRequestsCard] width:450]];
 }
 
 - (NSView *)dashboardBottomRow {
@@ -481,17 +478,20 @@ static NSString *CPRelativeTime(id epochValue) {
     }
 
     NSArray<NSDictionary *> *columns = @[
-        @{@"id": @"name", @"title": @"名称", @"width": @74},
-        @{@"id": @"state", @"title": @"状态", @"width": @72},
-        @{@"id": @"quota", @"title": @"5h", @"width": @54},
-        @{@"id": @"weekly", @"title": @"7d", @"width": @54},
+        @{@"id": @"name", @"title": @"名称", @"width": @40},
+        @{@"id": @"email", @"title": @"邮箱", @"width": @158},
+        @{@"id": @"state", @"title": @"状态", @"width": @40},
+        @{@"id": @"quota", @"title": @"5h", @"width": @40},
+        @{@"id": @"weekly", @"title": @"7d", @"width": @40},
     ];
     for (NSDictionary *spec in columns) {
         NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:spec[@"id"]];
         column.title = spec[@"title"];
         column.width = [spec[@"width"] doubleValue];
         column.minWidth = 34;
-        column.resizingMask = NSTableColumnAutoresizingMask;
+        column.resizingMask = NSTableColumnNoResizing;
+        BOOL leftAligned = [spec[@"id"] isEqualToString:@"name"] || [spec[@"id"] isEqualToString:@"email"];
+        column.headerCell.alignment = leftAligned ? NSTextAlignmentLeft : NSTextAlignmentCenter;
         [self.accountTable addTableColumn:column];
     }
     self.accountTable.columnAutoresizingStyle = NSTableViewNoColumnAutoresizing;
@@ -800,6 +800,7 @@ static NSString *CPRelativeTime(id epochValue) {
 
     NSStackView *stack = [[NSStackView alloc] init];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.alignment = NSLayoutAttributeWidth;
     stack.spacing = 8;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:stack];
@@ -821,61 +822,86 @@ static NSString *CPRelativeTime(id epochValue) {
     table.wantsLayer = YES;
     table.layer.backgroundColor = NSColor.controlBackgroundColor.CGColor;
     table.translatesAutoresizingMaskIntoConstraints = NO;
-    [table.heightAnchor constraintGreaterThanOrEqualToConstant:218].active = YES;
+    [table.heightAnchor constraintGreaterThanOrEqualToConstant:248].active = YES;
     [stack addArrangedSubview:table];
+    [table.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
 
     NSStackView *rows = [[NSStackView alloc] init];
     rows.orientation = NSUserInterfaceLayoutOrientationVertical;
+    rows.alignment = NSLayoutAttributeWidth;
     rows.spacing = 0;
     rows.translatesAutoresizingMaskIntoConstraints = NO;
     [table addSubview:rows];
     [self pinView:rows toView:table insets:NSEdgeInsetsMake(0, 0, 0, 0)];
 
-    NSStackView *head = [self recentRequestRowWithTime:@"时间" account:@"账号" status:@"状态" path:@"路径" header:YES];
+    NSView *head = [self recentRequestRowWithTime:@"时间" account:@"账号" status:@"状态" path:@"路径" header:YES];
     [rows addArrangedSubview:head];
+    [head.widthAnchor constraintEqualToAnchor:rows.widthAnchor].active = YES;
     NSArray *items = CPArray(self.statusSnapshot[@"recent_requests"]);
-    NSInteger count = MIN((NSInteger)items.count, 6);
+    NSInteger count = MIN((NSInteger)items.count, 9);
     for (NSInteger i = 0; i < count; i++) {
         NSDictionary *item = CPDict(items[i]);
-        [rows addArrangedSubview:[self recentRequestRowWithTime:[self requestTimeText:item[@"at"]]
-                                                        account:CPDisplayString(item[@"account"])
-                                                         status:CPDisplayString(item[@"status"])
-                                                           path:CPDisplayString(item[@"path"])
-                                                         header:NO]];
+        NSView *row = [self recentRequestRowWithTime:[self requestTimeText:item[@"at"]]
+                                             account:CPDisplayString(item[@"account"])
+                                              status:CPDisplayString(item[@"status"])
+                                                path:CPDisplayString(item[@"path"])
+                                              header:NO];
+        [rows addArrangedSubview:row];
+        [row.widthAnchor constraintEqualToAnchor:rows.widthAnchor].active = YES;
     }
     if (count == 0) {
-        [rows addArrangedSubview:[self emptyStateLabel:@"暂无最近请求。代理收到请求后会显示在这里。"]];
+        NSTextField *empty = [self emptyStateLabel:@"暂无最近请求。代理收到请求后会显示在这里。"];
+        [rows addArrangedSubview:empty];
+        [empty.widthAnchor constraintEqualToAnchor:rows.widthAnchor].active = YES;
     }
-    [stack addArrangedSubview:[self labelWithText:@"来自 /api/status.recent_requests，与 Web 最近请求一致" font:[NSFont systemFontOfSize:10 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor]];
     return card;
 }
 
-- (NSStackView *)recentRequestRowWithTime:(NSString *)time account:(NSString *)account status:(NSString *)status path:(NSString *)path header:(BOOL)header {
-    NSStackView *row = [[NSStackView alloc] init];
-    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    row.alignment = NSLayoutAttributeCenterY;
-    row.spacing = 6;
+- (NSView *)recentRequestRowWithTime:(NSString *)time account:(NSString *)account status:(NSString *)status path:(NSString *)path header:(BOOL)header {
+    NSView *row = [[NSView alloc] init];
     row.translatesAutoresizingMaskIntoConstraints = NO;
-    [row.heightAnchor constraintEqualToConstant:header ? 28 : 30].active = YES;
+    [row.heightAnchor constraintEqualToConstant:header ? 24 : 25].active = YES;
 
     NSTextField *timeLabel = [self labelWithText:time font:[NSFont monospacedSystemFontOfSize:10 weight:header ? NSFontWeightSemibold : NSFontWeightRegular] color:header ? NSColor.secondaryLabelColor : NSColor.labelColor];
-    NSTextField *accountLabel = [self labelWithText:account font:[NSFont systemFontOfSize:10 weight:header ? NSFontWeightSemibold : NSFontWeightRegular] color:header ? NSColor.secondaryLabelColor : NSColor.labelColor];
-    NSTextField *statusLabel = [self labelWithText:status font:[NSFont systemFontOfSize:10 weight:header ? NSFontWeightSemibold : NSFontWeightRegular] color:[status hasPrefix:@"2"] ? NSColor.systemGreenColor : (header ? NSColor.secondaryLabelColor : NSColor.systemOrangeColor)];
+    NSTextField *accountLabel = [self labelWithText:account font:[NSFont monospacedSystemFontOfSize:10 weight:header ? NSFontWeightSemibold : NSFontWeightRegular] color:header ? NSColor.secondaryLabelColor : NSColor.labelColor];
+    NSTextField *statusLabel = [self labelWithText:status font:[NSFont monospacedSystemFontOfSize:10 weight:header ? NSFontWeightSemibold : NSFontWeightRegular] color:[status hasPrefix:@"2"] ? NSColor.systemGreenColor : (header ? NSColor.secondaryLabelColor : NSColor.systemOrangeColor)];
     NSTextField *pathLabel = [self labelWithText:path font:[NSFont monospacedSystemFontOfSize:9 weight:NSFontWeightRegular] color:header ? NSColor.secondaryLabelColor : NSColor.secondaryLabelColor];
+    timeLabel.alignment = NSTextAlignmentLeft;
+    accountLabel.alignment = NSTextAlignmentLeft;
+    statusLabel.alignment = NSTextAlignmentCenter;
+    pathLabel.alignment = NSTextAlignmentLeft;
     pathLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    [timeLabel.widthAnchor constraintEqualToConstant:70].active = YES;
-    [accountLabel.widthAnchor constraintEqualToConstant:42].active = YES;
-    [statusLabel.widthAnchor constraintEqualToConstant:44].active = YES;
-    [row addArrangedSubview:timeLabel];
-    [row addArrangedSubview:accountLabel];
-    [row addArrangedSubview:statusLabel];
-    [row addArrangedSubview:pathLabel];
+    [row addSubview:timeLabel];
+    [row addSubview:accountLabel];
+    [row addSubview:statusLabel];
+    [row addSubview:pathLabel];
+    [NSLayoutConstraint activateConstraints:@[
+        [timeLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:8],
+        [timeLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [timeLabel.widthAnchor constraintEqualToConstant:54],
+
+        [accountLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:66],
+        [accountLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [accountLabel.widthAnchor constraintEqualToConstant:30],
+
+        [statusLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:106],
+        [statusLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [statusLabel.widthAnchor constraintEqualToConstant:30],
+
+        [pathLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:148],
+        [pathLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-8],
+        [pathLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+    ]];
     return row;
 }
 
 #pragma mark - View Helpers
 
 - (NSView *)constrainedContentView:(NSView *)content {
+    return [self constrainedContentView:content width:450];
+}
+
+- (NSView *)constrainedContentView:(NSView *)content width:(CGFloat)width {
     NSView *container = [[NSView alloc] init];
     container.translatesAutoresizingMaskIntoConstraints = NO;
     content.translatesAutoresizingMaskIntoConstraints = NO;
@@ -884,7 +910,7 @@ static NSString *CPRelativeTime(id epochValue) {
         [content.topAnchor constraintEqualToAnchor:container.topAnchor],
         [content.bottomAnchor constraintEqualToAnchor:container.bottomAnchor],
         [content.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
-        [content.widthAnchor constraintEqualToConstant:402],
+        [content.widthAnchor constraintEqualToConstant:width],
         [content.widthAnchor constraintLessThanOrEqualToAnchor:container.widthAnchor],
     ]];
     return container;
@@ -985,21 +1011,86 @@ static NSString *CPRelativeTime(id epochValue) {
     return nil;
 }
 
+- (NSImage *)brandIconImage {
+    NSArray<NSString *> *paths = @[
+        [self.resourceRuntimeDir stringByAppendingPathComponent:@"static/icons/dog-head.png"],
+        [self.resourceRuntimeDir stringByAppendingPathComponent:@"static/icons/icon-192.png"],
+        [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"AppIcon.icns"],
+    ];
+    for (NSString *path in paths) {
+        NSImage *image = [[NSImage alloc] initWithContentsOfFile:path];
+        if (image) {
+            image.accessibilityDescription = @"Codex Proxy 控制台";
+            return image;
+        }
+    }
+    return nil;
+}
+
+- (NSView *)sidebarBrandIconView {
+    NSView *container = [[NSView alloc] init];
+    container.translatesAutoresizingMaskIntoConstraints = NO;
+    [container.widthAnchor constraintEqualToConstant:102].active = YES;
+    [container.heightAnchor constraintEqualToConstant:64].active = YES;
+
+    NSImage *image = [self brandIconImage];
+    if (image) {
+        NSImageView *imageView = [[NSImageView alloc] init];
+        imageView.image = image;
+        imageView.imageScaling = NSImageScaleProportionallyUpOrDown;
+        imageView.translatesAutoresizingMaskIntoConstraints = NO;
+        imageView.accessibilityLabel = @"Codex Proxy 控制台";
+        [container addSubview:imageView];
+        [NSLayoutConstraint activateConstraints:@[
+            [imageView.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
+            [imageView.centerYAnchor constraintEqualToAnchor:container.centerYAnchor],
+            [imageView.widthAnchor constraintEqualToConstant:64],
+            [imageView.heightAnchor constraintEqualToConstant:64],
+        ]];
+    } else {
+        NSTextField *fallback = [self labelWithText:@"Codex" font:[NSFont systemFontOfSize:15 weight:NSFontWeightBold] color:NSColor.labelColor];
+        fallback.alignment = NSTextAlignmentCenter;
+        [container addSubview:fallback];
+        [NSLayoutConstraint activateConstraints:@[
+            [fallback.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
+            [fallback.centerYAnchor constraintEqualToAnchor:container.centerYAnchor],
+        ]];
+    }
+    return container;
+}
+
 - (NSView *)metricCardWithTitle:(NSString *)title value:(NSString *)value detail:(NSString *)detail color:(NSColor *)color {
     NSView *card = [self cardView];
     card.translatesAutoresizingMaskIntoConstraints = NO;
-    [card.heightAnchor constraintEqualToConstant:74].active = YES;
+    [card.heightAnchor constraintEqualToConstant:84].active = YES;
     [card.widthAnchor constraintGreaterThanOrEqualToConstant:112].active = YES;
 
-    NSStackView *stack = [[NSStackView alloc] init];
-    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    stack.spacing = 2;
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [card addSubview:stack];
-    [self pinView:stack toView:card insets:NSEdgeInsetsMake(10, 12, 10, 12)];
-    [stack addArrangedSubview:[self labelWithText:title font:[NSFont systemFontOfSize:11 weight:NSFontWeightMedium] color:NSColor.secondaryLabelColor]];
-    [stack addArrangedSubview:[self labelWithText:value ?: @"-" font:[NSFont systemFontOfSize:22 weight:NSFontWeightBold] color:color ?: NSColor.labelColor]];
-    [stack addArrangedSubview:[self labelWithText:detail ?: @"" font:[NSFont systemFontOfSize:11 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor]];
+    NSTextField *titleLabel = [self labelWithText:title font:[NSFont systemFontOfSize:10 weight:NSFontWeightMedium] color:NSColor.secondaryLabelColor];
+    NSTextField *valueLabel = [self labelWithText:value ?: @"-" font:[NSFont systemFontOfSize:20 weight:NSFontWeightBold] color:color ?: NSColor.labelColor];
+    NSTextField *detailLabel = [self labelWithText:detail ?: @"" font:[NSFont systemFontOfSize:10 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor];
+    for (NSTextField *label in @[titleLabel, valueLabel, detailLabel]) {
+        label.alignment = NSTextAlignmentCenter;
+        label.maximumNumberOfLines = 1;
+        label.lineBreakMode = NSLineBreakByTruncatingTail;
+        [label setContentCompressionResistancePriority:NSLayoutPriorityDefaultHigh forOrientation:NSLayoutConstraintOrientationVertical];
+        [card addSubview:label];
+    }
+    [NSLayoutConstraint activateConstraints:@[
+        [titleLabel.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:6],
+        [titleLabel.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-6],
+        [titleLabel.topAnchor constraintEqualToAnchor:card.topAnchor constant:10],
+        [titleLabel.heightAnchor constraintEqualToConstant:16],
+
+        [valueLabel.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:4],
+        [valueLabel.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-4],
+        [valueLabel.centerYAnchor constraintEqualToAnchor:card.centerYAnchor constant:0],
+        [valueLabel.heightAnchor constraintEqualToConstant:30],
+
+        [detailLabel.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:6],
+        [detailLabel.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-6],
+        [detailLabel.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-9],
+        [detailLabel.heightAnchor constraintEqualToConstant:16],
+    ]];
     return card;
 }
 
@@ -1636,13 +1727,16 @@ static NSString *CPRelativeTime(id epochValue) {
         cell.textField = field;
         [cell addSubview:field];
         [NSLayoutConstraint activateConstraints:@[
-            [field.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:6],
-            [field.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-6],
+            [field.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:2],
+            [field.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-2],
             [field.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
         ]];
     }
 
     cell.textField.textColor = NSColor.labelColor;
+    BOOL leftAligned = [identifier isEqualToString:@"name"] || [identifier isEqualToString:@"email"];
+    cell.textField.alignment = leftAligned ? NSTextAlignmentLeft : NSTextAlignmentCenter;
+    cell.textField.lineBreakMode = [identifier isEqualToString:@"email"] ? NSLineBreakByTruncatingMiddle : NSLineBreakByTruncatingTail;
     if ([identifier isEqualToString:@"name"]) {
         cell.textField.font = [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold];
         cell.textField.stringValue = CPDisplayString(account[@"name"]);
