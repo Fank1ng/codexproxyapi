@@ -162,7 +162,10 @@ def _sync_runtime_dir() -> None:
     for name in COPY_DIRS:
         src = source / name
         if src.exists():
-            shutil.copytree(src, RUNTIME_DIR / name, dirs_exist_ok=True)
+            dst = target / name
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst, symlinks=True)
     _sync_accounts_dir(source / "accounts", target / "accounts")
 
 

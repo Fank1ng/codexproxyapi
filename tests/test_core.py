@@ -281,6 +281,41 @@ class ControlActionsTests(unittest.TestCase):
         self.assertIn("列出账号", rendered)
 
 
+class ServiceManagerTests(unittest.TestCase):
+    def test_sync_runtime_replaces_code_dirs_and_preserves_user_state(self):
+        with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as runtime_tmp:
+            source = Path(source_tmp)
+            runtime = Path(runtime_tmp)
+            (source / "python" / "bin").mkdir(parents=True)
+            (source / "vendor").mkdir()
+            (source / "static").mkdir()
+            (source / "proxy.py").write_text("# new proxy\n")
+            (source / "config.json").write_text('{"port": 8801}\n')
+            (source / "python" / "bin" / "python3").write_text("new-python\n")
+            (source / "vendor" / "pkg.txt").write_text("new-vendor\n")
+            (source / "static" / "index.html").write_text("new-static\n")
+
+            (runtime / "python" / "bin").mkdir(parents=True)
+            (runtime / "vendor").mkdir()
+            (runtime / "static").mkdir()
+            (runtime / "accounts" / "a").mkdir(parents=True)
+            (runtime / "config.json").write_text('{"port": 8800}\n')
+            (runtime / "python" / "bin" / "python3").write_text("old-python\n")
+            (runtime / "vendor" / "pkg.txt").write_text("old-vendor\n")
+            (runtime / "static" / "index.html").write_text("old-static\n")
+            (runtime / "accounts" / "a" / "auth.json").write_text("{}\n")
+
+            with mock.patch.dict(os.environ, {service_manager.SOURCE_DIR_ENV: str(source)}), \
+                    mock.patch.object(service_manager, "RUNTIME_DIR", runtime):
+                service_manager._sync_runtime_dir()
+
+            self.assertEqual((runtime / "python" / "bin" / "python3").read_text(), "new-python\n")
+            self.assertEqual((runtime / "vendor" / "pkg.txt").read_text(), "new-vendor\n")
+            self.assertEqual((runtime / "static" / "index.html").read_text(), "new-static\n")
+            self.assertEqual((runtime / "config.json").read_text(), '{"port": 8800}\n')
+            self.assertEqual((runtime / "accounts" / "a" / "auth.json").read_text(), "{}\n")
+
+
 class TrashTests(unittest.TestCase):
     def test_trash_entry_parses_safe_name(self):
         item = proxy._trash_entry("account-a-20260515-120102")
@@ -435,6 +470,59 @@ class QuotaTrackerTests(unittest.TestCase):
         self.assertFalse(result["a"]["refreshed"])
         self.assertEqual(result["a"]["error"], "timeout")
 
+    def test_fetch_usage_uses_chatgpt_web_headers_and_account_id(self):
+        captured = {}
+
+        class FakeResponse:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def json(self):
+                return {"rate_limit": {}}
+
+        class FakeSession:
+            def get(self, url, headers=None, timeout=None):
+                captured["url"] = url
+                captured["headers"] = headers
+                captured["timeout"] = timeout
+                return FakeResponse()
+
+        account = Account("a", Path(tempfile.mkdtemp()) / "auth.json")
+        account.access_token = "token"
+        account.account_id = "account-123"
+
+        data = asyncio.run(quota_tracker._fetch_usage(account, FakeSession()))
+
+        self.assertEqual(data, {"rate_limit": {}})
+        self.assertEqual(captured["url"], quota_tracker.USAGE_URL)
+        self.assertEqual(captured["headers"]["Authorization"], "Bearer token")
+        self.assertEqual(captured["headers"]["chatgpt-account-id"], "account-123")
+        self.assertEqual(captured["headers"]["accept-encoding"], "identity")
+        self.assertEqual(captured["headers"]["Origin"], "https://chatgpt.com")
+        self.assertIn("Mozilla/5.0", captured["headers"]["User-Agent"])
+
+    def test_refresh_once_reports_usage_http_status(self):
+        root = Path(tempfile.mkdtemp())
+        account = Account("a", root / "a" / "auth.json")
+        account.enabled = True
+        account.access_token = "token"
+        pool = AccountPool()
+        pool.accounts = [account]
+
+        async def fake_fetch(acct, session):
+            raise quota_tracker.UsageFetchError(403)
+
+        with mock.patch("quota_tracker._fetch_usage", side_effect=fake_fetch):
+            result = asyncio.run(quota_tracker.refresh_once(pool))
+        self.assertFalse(result["a"]["refreshed"])
+        self.assertEqual(result["a"]["error"], "usage_http_403")
+        self.assertEqual(result["a"]["status"], 403)
+
 
 class ProxyCoreTests(unittest.TestCase):
     def test_clean_headers_removes_accept_encoding(self):
@@ -462,6 +550,32 @@ class ProxyCoreTests(unittest.TestCase):
         self.assertEqual(headers["Authorization"], "Bearer selected-token")
         self.assertEqual(headers["chatgpt-account-id"], "selected-account")
         self.assertNotIn("authorization", headers)
+
+    def test_backend_api_headers_are_chatgpt_web_compatible(self):
+        account = Account("picked", Path(tempfile.mkdtemp()) / "auth.json")
+        account.access_token = "selected-token"
+        account.account_id = "selected-account"
+
+        headers = _account_headers(
+            {"User-Agent": "codex-cli", "Origin": "http://127.0.0.1:8800"},
+            account,
+            "/backend-api/codex/responses",
+        )
+
+        self.assertIn("Mozilla/5.0", headers["User-Agent"])
+        self.assertEqual(headers["Origin"], "https://chatgpt.com")
+        self.assertEqual(headers["Referer"], "https://chatgpt.com/")
+        self.assertEqual(headers["Sec-Fetch-Site"], "same-origin")
+        self.assertEqual(headers["chatgpt-account-id"], "selected-account")
+
+    def test_v1_headers_do_not_force_chatgpt_web_headers(self):
+        account = Account("picked", Path(tempfile.mkdtemp()) / "auth.json")
+        account.access_token = "selected-token"
+
+        headers = _account_headers({"User-Agent": "codex-cli"}, account, "/v1/models")
+
+        self.assertEqual(headers["User-Agent"], "codex-cli")
+        self.assertNotIn("Origin", headers)
 
     def test_retry_after_seconds(self):
         self.assertEqual(_retry_after_seconds("42"), 42)

@@ -5,8 +5,44 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="Codex Proxy Control.app"
 APP="$ROOT/$APP_NAME"
 BUILD_DIR="$ROOT/build"
-STAGE="$BUILD_DIR/dmg-stage"
+STAGE_LINK="$BUILD_DIR/dmg-stage"
+STAGE="${TMPDIR:-/private/tmp}/codexproxyapi-dmg-stage"
 DIST="$ROOT/dist"
+
+clear_bundle_xattrs() {
+  local target="$1"
+  xattr -cr "$target" 2>/dev/null || true
+  find "$target" -exec xattr -d com.apple.provenance {} \; 2>/dev/null || true
+  find "$target" -exec xattr -d com.apple.FinderInfo {} \; 2>/dev/null || true
+  find "$target" -exec xattr -d 'com.apple.fileprovider.fpfs#P' {} \; 2>/dev/null || true
+  find "$target" -print0 | xargs -0 xattr -c 2>/dev/null || true
+}
+
+sign_macho_files() {
+  local target="$1"
+  local file filetype
+  find "$target" -type f -print0 | while IFS= read -r -d '' file; do
+    filetype="$(/usr/bin/file -b "$file" 2>/dev/null || true)"
+    if [[ "$filetype" == *Mach-O* ]]; then
+      codesign --force --sign - "$file" >/dev/null
+    fi
+  done
+}
+
+sign_runtime_components() {
+  local runtime="$1"
+  local python_framework="$runtime/python/Python3.framework"
+  local python_app="$python_framework/Versions/3.9/Resources/Python.app"
+  clear_bundle_xattrs "$runtime"
+  sign_macho_files "$runtime"
+  if [ -d "$python_app" ]; then
+    codesign --force --deep --sign - "$python_app" >/dev/null
+    codesign --verify --deep --strict "$python_app"
+  fi
+  if [ -d "$python_framework" ]; then
+    codesign --force --deep --sign - "$python_framework" >/dev/null
+  fi
+}
 
 "$ROOT/build_control_app.command"
 
@@ -15,8 +51,9 @@ DMG_NAME="Codex-Proxy-Control-${VERSION}-mac.dmg"
 DMG_TMP="$BUILD_DIR/${DMG_NAME%.dmg}.tmp.dmg"
 DMG="$DIST/$DMG_NAME"
 
-rm -rf "$STAGE"
-mkdir -p "$STAGE" "$DIST"
+rm -rf "$STAGE" "$STAGE_LINK"
+mkdir -p "$STAGE" "$DIST" "$BUILD_DIR"
+ln -s "$STAGE" "$STAGE_LINK"
 
 if [ ! -d "$APP" ]; then
   echo "Missing app bundle: $APP" >&2
@@ -50,10 +87,15 @@ TXT
 
 find "$STAGE" -name ".DS_Store" -delete
 find "$STAGE" \( -name "*.log" -o -name "recent_requests.json" \) -delete
-xattr -cr "$STAGE/$APP_NAME"
+clear_bundle_xattrs "$STAGE/$APP_NAME"
+sign_runtime_components "$STAGE/$APP_NAME/Contents/Resources/runtime"
 
 codesign --force --deep --sign - "$STAGE/$APP_NAME" >/dev/null
 codesign --verify --deep --strict "$STAGE/$APP_NAME"
+PYTHON_APP="$STAGE/$APP_NAME/Contents/Resources/runtime/python/Python3.framework/Versions/3.9/Resources/Python.app"
+if [ -d "$PYTHON_APP" ]; then
+  codesign --verify --deep --strict "$PYTHON_APP"
+fi
 
 rm -f "$DMG_TMP" "$DMG"
 hdiutil create \

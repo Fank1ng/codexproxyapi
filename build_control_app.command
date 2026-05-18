@@ -12,6 +12,41 @@ PYTHON="${PYTHON:-/usr/bin/python3}"
 PYTHON_FRAMEWORK="${PYTHON_FRAMEWORK:-/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework}"
 SIGNED_APP="${SIGNED_APP:-/private/tmp/Codex Proxy Control.app}"
 
+clear_bundle_xattrs() {
+  local target="$1"
+  xattr -cr "$target" 2>/dev/null || true
+  find "$target" -exec xattr -d com.apple.provenance {} \; 2>/dev/null || true
+  find "$target" -exec xattr -d com.apple.FinderInfo {} \; 2>/dev/null || true
+  find "$target" -exec xattr -d 'com.apple.fileprovider.fpfs#P' {} \; 2>/dev/null || true
+  find "$target" -print0 | xargs -0 xattr -c 2>/dev/null || true
+}
+
+sign_macho_files() {
+  local target="$1"
+  local file filetype
+  find "$target" -type f -print0 | while IFS= read -r -d '' file; do
+    filetype="$(/usr/bin/file -b "$file" 2>/dev/null || true)"
+    if [[ "$filetype" == *Mach-O* ]]; then
+      codesign --force --sign - "$file" >/dev/null
+    fi
+  done
+}
+
+sign_runtime_components() {
+  local runtime="$1"
+  local python_framework="$runtime/python/Python3.framework"
+  local python_app="$python_framework/Versions/3.9/Resources/Python.app"
+  clear_bundle_xattrs "$runtime"
+  sign_macho_files "$runtime"
+  if [ -d "$python_app" ]; then
+    codesign --force --deep --sign - "$python_app" >/dev/null
+    codesign --verify --deep --strict "$python_app"
+  fi
+  if [ -d "$python_framework" ]; then
+    codesign --force --deep --sign - "$python_framework" >/dev/null
+  fi
+}
+
 rm -rf "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/MacOS" "$RESOURCES" "$RUNTIME" "$VENDOR"
 
@@ -136,13 +171,14 @@ if [ -n "$AUTH_LEAK" ]; then
   exit 1
 fi
 
-xattr -cr "$APP"
-xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
+clear_bundle_xattrs "$APP"
 
 echo "Built $APP"
 
 rm -rf "$SIGNED_APP"
 ditto --norsrc "$APP" "$SIGNED_APP"
+clear_bundle_xattrs "$SIGNED_APP"
+sign_runtime_components "$SIGNED_APP/Contents/Resources/runtime"
 codesign --force --deep --sign - "$SIGNED_APP" >/dev/null
 codesign --verify --deep --strict "$SIGNED_APP"
 echo "Signed copy: $SIGNED_APP"

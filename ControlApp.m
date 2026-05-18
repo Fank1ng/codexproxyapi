@@ -1291,6 +1291,7 @@ static NSString *CPRelativeTime(id epochValue) {
     [self setBusy:YES message:@"正在刷新额度..."];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSDictionary *result = [self fetchJSONPath:@"/api/quota/refresh" method:@"POST" timeout:12.0];
+        NSDictionary *localStatus = [self runPythonJSONSync:@[@"status"] rawText:nil];
         id remoteStatus = [self fetchJSONPath:@"/api/status" method:@"GET" timeout:2.0];
         id remoteAccounts = [self fetchJSONPath:@"/api/accounts" method:@"GET" timeout:2.0];
         id remoteQuota = [self fetchJSONPath:@"/api/quota" method:@"GET" timeout:2.0];
@@ -1310,8 +1311,12 @@ static NSString *CPRelativeTime(id epochValue) {
                 ? [NSString stringWithFormat:@"额度刷新完成：%ld 成功 / %ld 失败", (long)refreshed, (long)failed]
                 : @"额度刷新失败：代理无响应或请求超时";
             [self appendLog:[NSString stringWithFormat:@"刷新额度\n%@", CPPrettyJSON(result ?: @{@"error": @"request failed"})]];
+            NSMutableDictionary *mergedStatus = [localStatus isKindOfClass:NSDictionary.class] ? [localStatus mutableCopy] : [self.statusSnapshot mutableCopy];
             if ([remoteStatus isKindOfClass:NSDictionary.class]) {
-                self.statusSnapshot = remoteStatus;
+                [mergedStatus addEntriesFromDictionary:remoteStatus];
+            }
+            if (mergedStatus.count) {
+                self.statusSnapshot = mergedStatus;
             }
             if ([remoteAccounts isKindOfClass:NSArray.class]) {
                 self.accounts = remoteAccounts;
@@ -1493,14 +1498,10 @@ static NSString *CPRelativeTime(id epochValue) {
         NSError *error = nil;
         NSDictionary *result = nil;
         NSString *body = nil;
-        if (![self copyRuntimeResourcesForce:YES error:&error]) {
-            result = @{@"error": [NSString stringWithFormat:@"同步 App 内置资源失败：%@", error.localizedDescription ?: @"unknown"]};
-        } else {
-            NSString *raw = nil;
-            result = [self runPythonJSONSync:@[@"apply-update"] rawText:&raw];
-            if (!result) {
-                result = @{@"error": raw ?: @"apply-update failed"};
-            }
+        NSString *raw = nil;
+        result = [self runApplyUpdateJSONSyncRawText:&raw];
+        if (!result) {
+            result = @{@"error": raw ?: @"apply-update failed"};
         }
         body = CPPrettyJSON(result);
         [self writeResultWithTitle:@"应用更新" body:body];
@@ -1598,16 +1599,34 @@ static NSString *CPRelativeTime(id epochValue) {
 
 #pragma mark - Runtime / Python
 
-- (NSString *)pythonExecutable {
-    NSFileManager *fm = NSFileManager.defaultManager;
-    NSArray<NSString *> *candidates = @[
+- (NSArray<NSString *> *)runtimePythonCandidates {
+    return @[
         [[self.runtimeDir stringByAppendingPathComponent:@"python/bin"] stringByAppendingPathComponent:@"python3"],
         [[self.runtimeDir stringByAppendingPathComponent:@"python/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS"] stringByAppendingPathComponent:@"Python"],
+    ];
+}
+
+- (NSArray<NSString *> *)resourcePythonCandidates {
+    return @[
         [[self.resourceRuntimeDir stringByAppendingPathComponent:@"python/bin"] stringByAppendingPathComponent:@"python3"],
         [[self.resourceRuntimeDir stringByAppendingPathComponent:@"python/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS"] stringByAppendingPathComponent:@"Python"],
+    ];
+}
+
+- (NSString *)pythonExecutablePreferRuntime:(BOOL)preferRuntime {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+    if (preferRuntime) {
+        [candidates addObjectsFromArray:[self runtimePythonCandidates]];
+        [candidates addObjectsFromArray:[self resourcePythonCandidates]];
+    } else {
+        [candidates addObjectsFromArray:[self resourcePythonCandidates]];
+        [candidates addObjectsFromArray:[self runtimePythonCandidates]];
+    }
+    [candidates addObjectsFromArray:@[
         @"/usr/bin/python3",
         @"/Library/Developer/CommandLineTools/usr/bin/python3",
-    ];
+    ]];
     for (NSString *candidate in candidates) {
         if ([fm isExecutableFileAtPath:candidate]) {
             return candidate;
@@ -1616,12 +1635,25 @@ static NSString *CPRelativeTime(id epochValue) {
     return @"/usr/bin/python3";
 }
 
+- (NSString *)pythonExecutable {
+    return [self pythonExecutablePreferRuntime:YES];
+}
+
 - (NSString *)runtimeVendorPath {
     NSString *vendor = [self.runtimeDir stringByAppendingPathComponent:@"vendor"];
     if ([NSFileManager.defaultManager fileExistsAtPath:vendor]) {
         return vendor;
     }
     return @"";
+}
+
+- (NSString *)vendorPathForSourceDir:(NSString *)sourceDir fallbackToRuntime:(BOOL)fallbackToRuntime {
+    NSString *sourceVendor = [sourceDir stringByAppendingPathComponent:@"vendor"];
+    BOOL isDir = NO;
+    if ([NSFileManager.defaultManager fileExistsAtPath:sourceVendor isDirectory:&isDir] && isDir) {
+        return sourceVendor;
+    }
+    return fallbackToRuntime ? [self runtimeVendorPath] : @"";
 }
 
 - (BOOL)ensureRuntimeReady:(NSError **)error {
@@ -1635,7 +1667,7 @@ static NSString *CPRelativeTime(id epochValue) {
         }
         return NO;
     }
-    return [self copyRuntimeResourcesForce:YES error:error];
+    return [self copyRuntimeResourcesForce:NO error:error];
 }
 
 - (BOOL)copyRuntimeResourcesForce:(BOOL)force error:(NSError **)error {
@@ -1656,9 +1688,6 @@ static NSString *CPRelativeTime(id epochValue) {
         NSString *src = [self.resourceRuntimeDir stringByAppendingPathComponent:item];
         NSString *dst = [self.runtimeDir stringByAppendingPathComponent:item];
         BOOL dstExists = [fm fileExistsAtPath:dst];
-        if (([item isEqualToString:@"python"] || [item isEqualToString:@"vendor"]) && dstExists) {
-            continue;
-        }
         if ([item isEqualToString:@"config.json"] && dstExists) {
             continue;
         }
@@ -1675,12 +1704,18 @@ static NSString *CPRelativeTime(id epochValue) {
     return YES;
 }
 
-- (NSDictionary<NSString *, NSString *> *)taskEnvironment {
+- (NSDictionary<NSString *, NSString *> *)taskEnvironmentForSourceDir:(NSString *)sourceDir
+                                                      includeProxyPython:(BOOL)includeProxyPython
+                                                     fallbackToRuntime:(BOOL)fallbackToRuntime {
     NSMutableDictionary *env = [NSProcessInfo.processInfo.environment mutableCopy];
-    env[@"CODEX_PROXY_SOURCE_DIR"] = self.resourceRuntimeDir;
+    env[@"CODEX_PROXY_SOURCE_DIR"] = sourceDir;
     env[@"CODEX_PROXY_APP_BUNDLE"] = self.appBundlePath;
-    env[@"CODEX_PROXY_PYTHON"] = [self pythonExecutable];
-    NSString *vendor = [self runtimeVendorPath];
+    if (includeProxyPython) {
+        env[@"CODEX_PROXY_PYTHON"] = [self pythonExecutable];
+    } else {
+        [env removeObjectForKey:@"CODEX_PROXY_PYTHON"];
+    }
+    NSString *vendor = [self vendorPathForSourceDir:sourceDir fallbackToRuntime:fallbackToRuntime];
     if (vendor.length > 0) {
         NSString *oldPath = env[@"PYTHONPATH"];
         env[@"PYTHONPATH"] = oldPath.length > 0 ? [NSString stringWithFormat:@"%@:%@", vendor, oldPath] : vendor;
@@ -1688,8 +1723,16 @@ static NSString *CPRelativeTime(id epochValue) {
     return env;
 }
 
-- (NSString *)runPythonTextSync:(NSArray<NSString *> *)args exitCode:(int *)exitCode {
-    NSString *script = [self.runtimeDir stringByAppendingPathComponent:@"control_actions.py"];
+- (NSDictionary<NSString *, NSString *> *)taskEnvironment {
+    return [self taskEnvironmentForSourceDir:self.resourceRuntimeDir includeProxyPython:YES fallbackToRuntime:YES];
+}
+
+- (NSString *)runPythonTextSyncWithScript:(NSString *)script
+                         workingDirectory:(NSString *)workingDirectory
+                               executable:(NSString *)executable
+                                     args:(NSArray<NSString *> *)args
+                              environment:(NSDictionary<NSString *, NSString *> *)environment
+                                 exitCode:(int *)exitCode {
     if (![NSFileManager.defaultManager fileExistsAtPath:script]) {
         if (exitCode) {
             *exitCode = 127;
@@ -1698,12 +1741,12 @@ static NSString *CPRelativeTime(id epochValue) {
     }
 
     NSTask *task = [[NSTask alloc] init];
-    task.executableURL = [NSURL fileURLWithPath:[self pythonExecutable]];
-    task.currentDirectoryURL = [NSURL fileURLWithPath:self.runtimeDir];
+    task.executableURL = [NSURL fileURLWithPath:executable];
+    task.currentDirectoryURL = [NSURL fileURLWithPath:workingDirectory];
     NSMutableArray<NSString *> *arguments = [NSMutableArray arrayWithObjects:@"-B", script, nil];
     [arguments addObjectsFromArray:args];
     task.arguments = arguments;
-    task.environment = [self taskEnvironment];
+    task.environment = environment;
 
     NSPipe *pipe = [NSPipe pipe];
     task.standardOutput = pipe;
@@ -1733,11 +1776,31 @@ static NSString *CPRelativeTime(id epochValue) {
     return text.length > 0 ? text : @"{}";
 }
 
-- (NSDictionary *)runPythonJSONSync:(NSArray<NSString *> *)args rawText:(NSString **)rawText {
+- (NSString *)runPythonTextSync:(NSArray<NSString *> *)args exitCode:(int *)exitCode {
+    NSString *script = [self.runtimeDir stringByAppendingPathComponent:@"control_actions.py"];
+    return [self runPythonTextSyncWithScript:script
+                            workingDirectory:self.runtimeDir
+                                  executable:[self pythonExecutable]
+                                        args:args
+                                 environment:[self taskEnvironment]
+                                    exitCode:exitCode];
+}
+
+- (NSDictionary *)runPythonJSONSyncWithScript:(NSString *)script
+                             workingDirectory:(NSString *)workingDirectory
+                                   executable:(NSString *)executable
+                                         args:(NSArray<NSString *> *)args
+                                  environment:(NSDictionary<NSString *, NSString *> *)environment
+                                      rawText:(NSString **)rawText {
     NSMutableArray *arguments = [args mutableCopy];
     [arguments addObjectsFromArray:@[@"--format", @"json"]];
     int exitCode = 0;
-    NSString *text = [self runPythonTextSync:arguments exitCode:&exitCode];
+    NSString *text = [self runPythonTextSyncWithScript:script
+                                      workingDirectory:workingDirectory
+                                            executable:executable
+                                                  args:arguments
+                                           environment:environment
+                                              exitCode:&exitCode];
     if (rawText) {
         *rawText = text;
     }
@@ -1752,6 +1815,29 @@ static NSString *CPRelativeTime(id epochValue) {
         return failed;
     }
     return @{@"error": text ?: @"request failed", @"exit_code": @(exitCode)};
+}
+
+- (NSDictionary *)runPythonJSONSync:(NSArray<NSString *> *)args rawText:(NSString **)rawText {
+    NSString *script = [self.runtimeDir stringByAppendingPathComponent:@"control_actions.py"];
+    return [self runPythonJSONSyncWithScript:script
+                            workingDirectory:self.runtimeDir
+                                  executable:[self pythonExecutable]
+                                        args:args
+                                 environment:[self taskEnvironment]
+                                     rawText:rawText];
+}
+
+- (NSDictionary *)runApplyUpdateJSONSyncRawText:(NSString **)rawText {
+    NSString *script = [self.resourceRuntimeDir stringByAppendingPathComponent:@"control_actions.py"];
+    NSDictionary *environment = [self taskEnvironmentForSourceDir:self.resourceRuntimeDir
+                                               includeProxyPython:NO
+                                                fallbackToRuntime:NO];
+    return [self runPythonJSONSyncWithScript:script
+                            workingDirectory:self.resourceRuntimeDir
+                                  executable:[self pythonExecutablePreferRuntime:NO]
+                                        args:@[@"apply-update"]
+                                 environment:environment
+                                     rawText:rawText];
 }
 
 - (id)fetchJSONPath:(NSString *)path method:(NSString *)method timeout:(NSTimeInterval)timeout {

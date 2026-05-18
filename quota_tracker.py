@@ -10,21 +10,30 @@ import aiohttp
 
 from account_manager import AccountPool, ACCOUNTS_DIR
 from config import get
+from proxy_core import _account_headers
 
 USAGE_URL = "https://chatgpt.com/backend-api/codex/usage"
 
 logger = logging.getLogger(__name__)
 
 
+class UsageFetchError(Exception):
+    def __init__(self, status: int):
+        super().__init__(f"usage API returned {status}")
+        self.status = status
+
+
 async def _fetch_usage(account, session: aiohttp.ClientSession) -> Optional[dict]:
     if not account.access_token:
         return None
-    headers = {
-        "Authorization": f"Bearer {account.access_token}",
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        "Origin": "https://chatgpt.com",
-    }
+    headers = _account_headers(
+        {
+            "Accept": "*/*",
+            "accept-encoding": "identity",
+        },
+        account,
+        "/backend-api/codex/usage",
+    )
     try:
         async with session.get(
             USAGE_URL,
@@ -35,9 +44,11 @@ async def _fetch_usage(account, session: aiohttp.ClientSession) -> Optional[dict
                 logger.debug(
                     f"Account {account.name}: usage API returned {resp.status}"
                 )
-                return None
+                raise UsageFetchError(resp.status)
             return await resp.json()
     except asyncio.TimeoutError:
+        raise
+    except UsageFetchError:
         raise
     except Exception as e:
         logger.debug(f"Account {account.name}: usage fetch error: {e}")
@@ -58,6 +69,12 @@ async def refresh_once(pool: AccountPool) -> dict:
         except asyncio.TimeoutError:
             logger.debug(f"Account {acct.name}: usage fetch timed out")
             return acct.name, {"refreshed": False, "error": "timeout"}
+        except UsageFetchError as e:
+            return acct.name, {
+                "refreshed": False,
+                "error": f"usage_http_{e.status}",
+                "status": e.status,
+            }
         if data:
             quota_file = ACCOUNTS_DIR / acct.name / "quota.json"
             data["_fetched_at"] = time.time()

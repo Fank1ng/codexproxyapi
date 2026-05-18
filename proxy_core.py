@@ -46,6 +46,20 @@ MODEL_IDS = (
     "gpt-5.2",
 )
 
+CHATGPT_WEB_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://chatgpt.com",
+    "Referer": "https://chatgpt.com/",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Dest": "empty",
+}
+
 
 def _get_upstream(path: str) -> Optional[str]:
     for prefix, host in UPSTREAM_MAP.items():
@@ -109,6 +123,8 @@ def _clean_headers(headers: dict) -> dict:
 
 def _account_headers(base_headers: dict, account, path: str) -> dict:
     headers = dict(base_headers)
+    if path.startswith("/backend-api/"):
+        headers.update(CHATGPT_WEB_HEADERS)
     headers["Authorization"] = f"Bearer {account.access_token}"
     if path.startswith("/backend-api/") and account.account_id:
         headers["chatgpt-account-id"] = account.account_id
