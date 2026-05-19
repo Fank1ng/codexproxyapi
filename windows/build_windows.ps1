@@ -13,6 +13,21 @@ $Build = Join-Path $Root "build\windows"
 $Runtime = Join-Path $Dist "runtime"
 $Vendor = Join-Path $Runtime "vendor"
 $IconPath = Join-Path $Root "static\icons\favicon.ico"
+$ServiceCollectModules = @(
+    "asyncio",
+    "aiohappyeyeballs",
+    "aiohttp",
+    "aiosignal",
+    "attrs",
+    "frozenlist",
+    "multidict",
+    "propcache",
+    "yarl"
+)
+$ServiceCollectArgs = foreach ($Module in $ServiceCollectModules) {
+    "--collect-submodules"
+    $Module
+}
 
 Set-Location $Root
 
@@ -82,6 +97,7 @@ Assert-NativeCommandSucceeded "PyInstaller control build"
     --specpath $Build `
     --paths $Root `
     --paths $WindowsDir `
+    @ServiceCollectArgs `
     (Join-Path $WindowsDir "codex_proxy_service.py")
 Assert-NativeCommandSucceeded "PyInstaller service build"
 
