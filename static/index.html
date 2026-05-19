@@ -146,6 +146,34 @@ async function importCurrentAccount() {
   await refreshAll();
 }
 
+async function deleteAccount(name) {
+  if (!confirm(`删除账号 ${name}？账号目录会移动到回收区。`)) return;
+  const status = document.getElementById('login-status');
+  status.textContent = `正在删除账号 ${name}...`;
+  const result = await fetchJSON(`/api/accounts/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (result.error) {
+    status.textContent = `删除失败：${result.error}`;
+    return;
+  }
+  status.textContent = `已删除账号 ${name}`;
+  await refreshAll();
+}
+
+async function toggleAccount(name) {
+  const result = await fetchJSON(`/api/accounts/${encodeURIComponent(name)}/toggle`, { method: 'PUT' });
+  const status = document.getElementById('login-status');
+  status.textContent = result.error ? `切换失败：${result.error}` : `已更新账号 ${name}`;
+  await refreshAll();
+}
+
+async function refreshAccount(name) {
+  const status = document.getElementById('login-status');
+  status.textContent = `正在刷新账号 ${name}...`;
+  const result = await fetchJSON(`/api/accounts/${encodeURIComponent(name)}/refresh`, { method: 'POST' });
+  status.textContent = result.error ? `刷新失败：${result.error}` : `已刷新账号 ${name}`;
+  await refreshAll();
+}
+
 async function startAccountLogin() {
   const name = accountName();
   if (!name) return;
@@ -247,7 +275,7 @@ function renderAccounts(accounts, quota) {
     document.getElementById('account-list').innerHTML = '<p>未发现账号。</p>';
     return;
   }
-  document.getElementById('account-list').innerHTML = `<table><thead><tr><th>名称</th><th>Email</th><th>状态</th><th>5h 剩余</th><th>7d 剩余</th><th>刷新时间</th><th>Token</th></tr></thead><tbody>${
+  document.getElementById('account-list').innerHTML = `<table><thead><tr><th>名称</th><th>Email</th><th>状态</th><th>5h 剩余</th><th>7d 剩余</th><th>刷新时间</th><th>Token</th><th>操作</th></tr></thead><tbody>${
     accounts.map(account => {
       const q = quota?.[account.name] || null;
       const summary = quotaSummary(q);
@@ -259,9 +287,20 @@ function renderAccounts(accounts, quota) {
       <td>${quotaCell(summary.sevenDay)}</td>
       <td>${refreshCell(summary)}</td>
       <td>${account.expires_at ? esc(new Date(account.expires_at * 1000).toLocaleString()) : '-'}</td>
+      <td>${accountActions(account)}</td>
     </tr>`;
     }).join('')
   }</tbody></table>`;
+}
+
+function accountActions(account) {
+  const encoded = esc(JSON.stringify(account.name || ''));
+  const toggleLabel = account.enabled ? '禁用' : '启用';
+  return `<div class="toolbar">
+    <button onclick='toggleAccount(${encoded})'>${toggleLabel}</button>
+    <button onclick='refreshAccount(${encoded})'>刷新</button>
+    <button onclick='deleteAccount(${encoded})'>删除</button>
+  </div>`;
 }
 
 function quotaSummary(data) {
