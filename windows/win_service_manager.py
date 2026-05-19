@@ -17,6 +17,7 @@ from typing import Iterable, Optional
 TASK_NAME = "CodexProxyApi"
 CONFIG_DIR_ENV = "CODEX_PROXY_CONFIG_DIR"
 SOURCE_DIR_ENV = "CODEX_PROXY_SOURCE_DIR"
+PYTHON_BOOT_ENV_KEYS = ("PYTHONHOME", "PYTHONPATH", "PYTHONPLATLIBDIR", "PYTHONSAFEPATH")
 RUNTIME_DIR = Path(
     os.environ.get(CONFIG_DIR_ENV)
     or (Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "codexproxyapi")
@@ -231,10 +232,9 @@ def _start_supervisor_process(service_command: list[str]) -> None:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     LOG_PATH.touch(exist_ok=True)
     env = {
-        **os.environ,
+        **_clean_python_boot_env(os.environ),
         CONFIG_DIR_ENV: str(RUNTIME_DIR),
         SOURCE_DIR_ENV: str(_source_dir()),
-        "PYTHONPATH": _pythonpath_env(),
         "PYTHONUNBUFFERED": "1",
     }
     flags = (
@@ -337,7 +337,13 @@ def _proxy_health() -> Optional[dict]:
 
 
 def _run(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
-    result = subprocess.run(args, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    result = subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        env=_clean_python_boot_env(os.environ),
+    )
     if check and result.returncode != 0:
         raise RuntimeError(_process_message(result) or f"command failed: {args[0]}")
     return result
@@ -364,13 +370,8 @@ def _current_user() -> str:
     return username or os.getlogin()
 
 
-def _pythonpath_env() -> str:
-    paths = []
-    vendor = RUNTIME_DIR / "vendor"
-    if vendor.exists():
-        paths.append(str(vendor))
-    paths.append(str(RUNTIME_DIR))
-    existing = os.environ.get("PYTHONPATH")
-    if existing:
-        paths.append(existing)
-    return os.pathsep.join(paths)
+def _clean_python_boot_env(env: dict[str, str]) -> dict[str, str]:
+    cleaned = dict(env)
+    for key in PYTHON_BOOT_ENV_KEYS:
+        cleaned.pop(key, None)
+    return cleaned

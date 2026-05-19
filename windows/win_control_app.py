@@ -23,6 +23,14 @@ import win_service_manager  # noqa: E402
 
 
 APP_URL = "http://127.0.0.1:8800/app"
+PYTHON_BOOT_ENV_KEYS = ("PYTHONHOME", "PYTHONPATH", "PYTHONPLATLIBDIR", "PYTHONSAFEPATH")
+
+
+def clean_python_boot_env(env: dict[str, str]) -> dict[str, str]:
+    cleaned = dict(env)
+    for key in PYTHON_BOOT_ENV_KEYS:
+        cleaned.pop(key, None)
+    return cleaned
 
 
 def service_command(*args: str) -> list[str]:
@@ -82,7 +90,7 @@ class ControlApp:
 
     def run_service(self, *args: str) -> dict:
         env = {
-            **os.environ,
+            **clean_python_boot_env(os.environ),
             "CODEX_PROXY_SOURCE_DIR": str(SOURCE_RUNTIME),
             "CODEX_PROXY_CONFIG_DIR": str(win_service_manager.RUNTIME_DIR),
         }

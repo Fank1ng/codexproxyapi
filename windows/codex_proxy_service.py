@@ -28,6 +28,14 @@ os.environ.setdefault("CODEX_PROXY_CONFIG_DIR", str(RUNTIME_DIR))
 os.environ.setdefault("PYTHONUNBUFFERED", "1")
 VENDOR_DIR = RUNTIME_DIR / "vendor"
 DLL_DIRECTORY_HANDLES = []
+PYTHON_BOOT_ENV_KEYS = ("PYTHONHOME", "PYTHONPATH", "PYTHONPLATLIBDIR", "PYTHONSAFEPATH")
+
+
+def _clean_python_boot_env(env: dict[str, str]) -> dict[str, str]:
+    cleaned = dict(env)
+    for key in PYTHON_BOOT_ENV_KEYS:
+        cleaned.pop(key, None)
+    return cleaned
 
 
 def _configure_runtime_imports() -> None:
@@ -88,7 +96,7 @@ def _supervise() -> int:
     log_path = RUNTIME_DIR / "proxy.log"
     _configure_runtime_imports()
     env = {
-        **os.environ,
+        **_clean_python_boot_env(os.environ),
         "CODEX_PROXY_CONFIG_DIR": str(RUNTIME_DIR),
         "CODEX_PROXY_SOURCE_DIR": str(_source_runtime_dir()),
         "PYTHONUNBUFFERED": "1",
