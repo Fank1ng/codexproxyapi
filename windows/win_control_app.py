@@ -157,7 +157,21 @@ def decode_jwt_claims(token: str) -> dict:
 
 
 def find_codex_cli() -> str | None:
-    return shutil.which("codex")
+    found = shutil.which("codex")
+    if found:
+        return found
+    windows_apps = Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "WindowsApps"
+    try:
+        for candidate in windows_apps.glob("OpenAI.Codex_*_x64__*\\app\\resources\\codex.exe"):
+            if candidate.exists():
+                return str(candidate)
+    except OSError:
+        pass
+    return None
+
+
+def powershell_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 class ControlApp:
@@ -319,29 +333,33 @@ class ControlApp:
             if not codex_cli:
                 raise FileNotFoundError("Codex CLI not found in PATH")
             target.mkdir(parents=True, exist_ok=True)
-            log_path = win_service_manager.RUNTIME_DIR / "login.log"
-            env = {
-                **clean_python_boot_env(os.environ),
-                "CODEX_HOME": str(target),
-            }
-            with open(log_path, "a", encoding="utf-8", buffering=1) as log:
-                log.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] starting login for {safe_name}\n")
-                process = subprocess.Popen(
-                    [codex_cli, "login"],
-                    cwd=str(win_service_manager.RUNTIME_DIR),
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-                )
+            command = (
+                f"$env:CODEX_HOME = {powershell_literal(str(target))}; "
+                f"Set-Location {powershell_literal(str(win_service_manager.RUNTIME_DIR))}; "
+                f"Write-Host 'Starting Codex login for account: {safe_name}'; "
+                f"& {powershell_literal(codex_cli)} login; "
+                "Write-Host ''; "
+                "Write-Host 'Login finished. Return to Codex Proxy Control and click Scan Accounts.'"
+            )
+            process = subprocess.Popen(
+                [
+                    "powershell.exe",
+                    "-NoExit",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    command,
+                ],
+                cwd=str(win_service_manager.RUNTIME_DIR),
+                env=clean_python_boot_env(os.environ),
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            )
             return {
                 "action": "login_started",
                 "account": safe_name,
                 "account_dir": str(target),
-                "log_path": str(log_path),
                 "pid": process.pid,
-                "hint": "Complete the browser sign-in, then click Scan Accounts.",
+                "hint": "A PowerShell login window was opened. Complete the browser sign-in, then click Scan Accounts.",
             }
 
         self.run_bg("Starting account login", work)
