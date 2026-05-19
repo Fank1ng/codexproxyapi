@@ -102,8 +102,8 @@ def uninstall() -> dict:
 def stop() -> dict:
     _require_windows()
     _run(["schtasks", "/End", "/TN", TASK_NAME], check=False)
-    _taskkill(_read_pid(PROXY_PID_PATH))
-    _taskkill(_read_pid(SUPERVISOR_PID_PATH))
+    _stop_process(_read_pid(PROXY_PID_PATH))
+    _stop_process(_read_pid(SUPERVISOR_PID_PATH))
     result = status()
     result["action"] = "stop"
     return result
@@ -111,10 +111,10 @@ def stop() -> dict:
 
 def restart(*, source_runtime: Optional[Path] = None, service_command: Optional[list[str]] = None) -> dict:
     _require_windows()
+    stop()
     if source_runtime:
         sync_runtime(source_runtime)
     task_error = None
-    stop()
     try:
         if service_command and _task_query().returncode != 0:
             _create_task(service_command)
@@ -151,7 +151,7 @@ def sync_runtime(source_runtime: Path) -> dict:
             continue
         dst = RUNTIME_DIR / name
         if dst.exists():
-            shutil.rmtree(dst)
+            _rmtree_retry(dst)
         shutil.copytree(src, dst)
     _sync_accounts(source / "accounts", RUNTIME_DIR / "accounts")
     _assert_no_packaged_credentials(RUNTIME_DIR)
@@ -264,10 +264,32 @@ def _task_query() -> subprocess.CompletedProcess:
     return _run(["schtasks", "/Query", "/TN", TASK_NAME, "/FO", "LIST", "/V"], check=False)
 
 
-def _taskkill(pid: Optional[int]) -> None:
+def _stop_process(pid: Optional[int]) -> None:
     if not pid:
         return
     _run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False)
+    _wait_for_pid_exit(pid)
+
+
+def _wait_for_pid_exit(pid: int, *, timeout: float = 5.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not _pid_running(pid):
+            return
+        time.sleep(0.2)
+
+
+def _rmtree_retry(path: Path, *, attempts: int = 10, delay: float = 0.4) -> None:
+    last_error: Optional[OSError] = None
+    for _ in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError as exc:
+            last_error = exc
+            time.sleep(delay)
+    if last_error:
+        raise last_error
 
 
 def _pid_running(pid: Optional[int]) -> bool:
