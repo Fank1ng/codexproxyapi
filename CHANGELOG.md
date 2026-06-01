@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.5.1 - 2026-06-01
+
+- Added shared Codex CLI discovery for Windows and macOS control flows.
+- Improved Windows Codex CLI lookup for local app installs, PATH entries, and registry hints.
+- Added clear `CODEX_CLI_PATH` guidance when the Codex CLI cannot be found.
+- Standardized UTF-8 file and subprocess handling for Windows release builds.
+- Included `codex_cli.py` in the Windows runtime packaging list.
+
 ## v0.5.0 - 2026-05-20
 
 - Added the first Windows 11 installer path using PyInstaller and Inno Setup.
