@@ -1,6 +1,7 @@
 """Core proxy — request forwarding with account pool, failover, and SSE streaming."""
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import random
 import time
@@ -15,11 +16,67 @@ from config import get
 
 logger = logging.getLogger(__name__)
 
+
+class _RetryableStreamError(Exception):
+    """Raised when a stream fails before anything has been sent downstream."""
+
+    def __init__(self, message: str, *, bytes_read: int = 0, completed: bool = False):
+        super().__init__(message)
+        self.bytes_read = bytes_read
+        self.completed = completed
+
+
+@dataclass
+class _BufferedStreamResult:
+    body: bytes
+    bytes_read: int
+    completed: bool
+    stream_mode: str
+
+
+@dataclass
+class _WebSocketConnectResult:
+    account: object
+    upstream_ws: object
+    retry_idx: int
+    started: float
+    attempts: list[dict]
+
+
+@dataclass
+class _WebSocketRelayResult:
+    origin: str
+    messages: int
+    bytes_forwarded: int
+    completed: bool
+    close_code: Optional[int] = None
+    error: str = ""
+
+
 UPSTREAM_MAP = {
     "/v1/": "https://api.openai.com",
     "/backend-api/": "https://chatgpt.com",
 }
+V1_RESPONSES_PATH = "/v1/responses"
 CODEX_RESPONSES_PATH = "/backend-api/codex/responses"
+CODEX_COMPLETED_MARKER = b"response.completed"
+
+
+class _CodexCompletionTracker:
+    def __init__(self, marker: bytes = CODEX_COMPLETED_MARKER):
+        self.marker = marker
+        self.completed = False
+        self._tail = b""
+
+    def feed(self, chunk: bytes) -> bool:
+        if self.completed:
+            return True
+        if not chunk:
+            return False
+        window = self._tail + chunk
+        self.completed = self.marker in window
+        self._tail = window[-(len(self.marker) - 1):]
+        return self.completed
 
 HOP_HEADERS = {
     "host", "transfer-encoding", "content-length", "connection",
@@ -63,6 +120,8 @@ CHATGPT_WEB_HEADERS = {
 
 
 def _get_upstream(path: str) -> Optional[str]:
+    if _is_v1_codex_responses_path(path):
+        return "https://chatgpt.com"
     for prefix, host in UPSTREAM_MAP.items():
         if path.startswith(prefix):
             return host
@@ -75,14 +134,89 @@ def _is_models_path(path: str) -> bool:
 
 def _is_openai_inference_path(path: str) -> bool:
     return (
-        path == "/v1/responses"
-        or path == "/v1/chat/completions"
+        path == "/v1/chat/completions"
         or path == "/v1/completions"
     )
 
 
+def _is_v1_codex_responses_path(path: str) -> bool:
+    return path == V1_RESPONSES_PATH or path.startswith(f"{V1_RESPONSES_PATH}/")
+
+
 def _is_codex_responses_path(path: str) -> bool:
-    return path == CODEX_RESPONSES_PATH or path.startswith(f"{CODEX_RESPONSES_PATH}/")
+    return (
+        _is_v1_codex_responses_path(path)
+        or path == CODEX_RESPONSES_PATH
+        or path.startswith(f"{CODEX_RESPONSES_PATH}/")
+    )
+
+
+def _codex_upstream_path(path: str) -> str:
+    if path == V1_RESPONSES_PATH:
+        return CODEX_RESPONSES_PATH
+    if path.startswith(f"{V1_RESPONSES_PATH}/"):
+        return f"{CODEX_RESPONSES_PATH}{path[len(V1_RESPONSES_PATH):]}"
+    return path
+
+
+def _target_url(upstream: str, path: str, query_string: str = "") -> str:
+    target = f"{upstream}{_codex_upstream_path(path)}"
+    if query_string:
+        target += f"?{query_string}"
+    return target
+
+
+def _websocket_target_url(path: str, query_string: str = "") -> str:
+    return _target_url("wss://chatgpt.com", path, query_string)
+
+
+def _uses_chatgpt_backend(path: str) -> bool:
+    return path.startswith("/backend-api/") or _is_v1_codex_responses_path(path)
+
+
+def _is_websocket_request(request: web.Request) -> bool:
+    return request.headers.get("Upgrade", "").lower() == "websocket"
+
+
+def _websocket_protocols(headers: dict) -> list[str]:
+    value = headers.get("Sec-WebSocket-Protocol") or headers.get("sec-websocket-protocol") or ""
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _clean_websocket_headers(headers: dict) -> dict:
+    blocked = {
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-extensions",
+        "sec-websocket-protocol",
+    }
+    return {k: v for k, v in _clean_headers(headers).items() if k.lower() not in blocked}
+
+
+def _http_transport_label(stream_mode: str) -> str:
+    if not stream_mode:
+        return ""
+    if stream_mode == "realtime":
+        return "http-realtime"
+    if stream_mode == "buffered":
+        return "http-buffered"
+    return "http-hybrid"
+
+
+def _ws_message_bytes(message: aiohttp.WSMessage) -> int:
+    if message.type == aiohttp.WSMsgType.TEXT:
+        return len(message.data.encode("utf-8"))
+    if message.type == aiohttp.WSMsgType.BINARY:
+        return len(message.data)
+    return 0
+
+
+def _feed_ws_completion(tracker: _CodexCompletionTracker, message: aiohttp.WSMessage) -> None:
+    if message.type == aiohttp.WSMsgType.TEXT:
+        tracker.feed(message.data.encode("utf-8"))
+    elif message.type == aiohttp.WSMsgType.BINARY:
+        tracker.feed(message.data)
+
 
 
 def _models_response(request_id: str, path: str) -> web.Response:
@@ -128,10 +262,10 @@ def _clean_headers(headers: dict) -> dict:
 
 def _account_headers(base_headers: dict, account, path: str) -> dict:
     headers = dict(base_headers)
-    if path.startswith("/backend-api/"):
+    if _uses_chatgpt_backend(path):
         headers.update(CHATGPT_WEB_HEADERS)
     headers["Authorization"] = f"Bearer {account.access_token}"
-    if path.startswith("/backend-api/") and account.account_id:
+    if _uses_chatgpt_backend(path) and account.account_id:
         headers["chatgpt-account-id"] = account.account_id
     return headers
 
@@ -160,6 +294,18 @@ def _transient_backoff_seconds(attempt: int) -> float:
     if backoff_ms <= 0:
         return 0
     return (backoff_ms / 1000) * (2 ** attempt) + random.uniform(0, 0.1)
+
+
+def _codex_stream_mode() -> str:
+    mode = str(get("codex_stream_mode") or "hybrid").lower()
+    if mode not in {"realtime", "buffered", "hybrid"}:
+        return "hybrid"
+    return mode
+
+
+def _codex_stream_retry_cooldown() -> int:
+    configured = int(get("codex_stream_retry_cooldown") or 0)
+    return configured if configured > 0 else int(get("rate_limit_cooldown") or 60)
 
 
 def _is_streaming_response(upstream_resp: aiohttp.ClientResponse) -> bool:
@@ -221,6 +367,520 @@ def _upstream_failure_response(
     )
 
 
+def _stream_error_detail(
+    reason: str,
+    error: str,
+    bytes_forwarded: int,
+    completed: bool,
+) -> str:
+    return (
+        f"{reason}: {error}; bytes_forwarded={bytes_forwarded}; "
+        f"response_completed={completed}"
+    )
+
+
+def _buffered_stream_error_detail(
+    reason: str,
+    error: str,
+    bytes_read: int,
+    completed: bool,
+    stream_mode: str,
+) -> str:
+    return (
+        f"{reason}: {error}; bytes_read={bytes_read}; "
+        f"response_completed={completed}; stream_mode={stream_mode}"
+    )
+
+
+def _websocket_error_detail(
+    reason: str,
+    error: str,
+    messages: int,
+    bytes_forwarded: int,
+    completed: bool,
+    close_code: Optional[int],
+) -> str:
+    return (
+        f"{reason}: {error}; messages={messages}; bytes_forwarded={bytes_forwarded}; "
+        f"response_completed={completed}; close_code={close_code}"
+    )
+
+
+def _websocket_close_message(message: str) -> bytes:
+    encoded = message.encode("utf-8", "replace")
+    if len(encoded) <= 120:
+        return encoded
+    return encoded[:117] + b"..."
+
+
+async def _close_websocket_safely(client_ws, *, code: int, message: str = "") -> None:
+    try:
+        await client_ws.close(code=code, message=_websocket_close_message(message))
+    except (ConnectionResetError, RuntimeError, AssertionError):
+        pass
+
+
+def _record_ws_stream_interrupted(
+    pool: AccountPool,
+    account,
+    path: str,
+    request_id: str,
+    retry_idx: int,
+    result: _WebSocketRelayResult,
+    cooldown: int,
+) -> None:
+    detail = _websocket_error_detail(
+        "ws_stream_interrupted",
+        result.error or "websocket closed before response.completed",
+        result.messages,
+        result.bytes_forwarded,
+        result.completed,
+        result.close_code,
+    )
+    logger.warning(
+        "websocket stream interrupted request_id=%s account=%s path=%s messages=%s "
+        "bytes_forwarded=%s response_completed=%s close_code=%s error=%s",
+        request_id,
+        account.name,
+        path,
+        result.messages,
+        result.bytes_forwarded,
+        result.completed,
+        result.close_code,
+        result.error,
+    )
+    pool.record_error(path, detail, account, request_id, retry_idx)
+    pool.mark_rate_limited(account, cooldown, "ws_stream_interrupted")
+
+
+def _record_stream_interrupted(
+    pool: AccountPool,
+    account,
+    path: str,
+    request_id: str,
+    retry_idx: int,
+    error: str,
+    bytes_forwarded: int,
+    completed: bool,
+    cooldown: int,
+) -> None:
+    detail = _stream_error_detail("stream_interrupted", error, bytes_forwarded, completed)
+    logger.warning(
+        "stream interrupted request_id=%s account=%s path=%s bytes_forwarded=%s "
+        "response_completed=%s error=%s",
+        request_id,
+        account.name,
+        path,
+        bytes_forwarded,
+        completed,
+        error,
+    )
+    pool.record_error(path, detail, account, request_id, retry_idx)
+    pool.mark_rate_limited(account, cooldown, "stream_interrupted")
+
+
+def _record_buffered_stream_interrupted(
+    pool: AccountPool,
+    account,
+    path: str,
+    request_id: str,
+    retry_idx: int,
+    error: _RetryableStreamError,
+    stream_mode: str,
+    cooldown: int,
+) -> None:
+    detail = _buffered_stream_error_detail(
+        "stream_interrupted",
+        str(error),
+        error.bytes_read,
+        error.completed,
+        stream_mode,
+    )
+    logger.warning(
+        "buffered stream interrupted request_id=%s account=%s path=%s bytes_read=%s "
+        "response_completed=%s stream_mode=%s error=%s",
+        request_id,
+        account.name,
+        path,
+        error.bytes_read,
+        error.completed,
+        stream_mode,
+        error,
+    )
+    pool.record_error(path, detail, account, request_id, retry_idx)
+    pool.mark_rate_limited(account, cooldown, "stream_interrupted")
+
+
+def _record_client_disconnect(
+    pool: AccountPool,
+    account,
+    path: str,
+    request_id: str,
+    retry_idx: int,
+    error: str,
+    bytes_forwarded: int,
+    completed: bool,
+) -> None:
+    detail = _stream_error_detail("client_disconnected", error, bytes_forwarded, completed)
+    logger.info(
+        "client disconnected request_id=%s account=%s path=%s bytes_forwarded=%s "
+        "response_completed=%s error=%s",
+        request_id,
+        account.name,
+        path,
+        bytes_forwarded,
+        completed,
+        error,
+    )
+    pool.record_error(path, detail, account, request_id, retry_idx)
+
+
+async def _fetch_complete_codex_stream(
+    upstream_resp: aiohttp.ClientResponse,
+    mode: str,
+) -> _BufferedStreamResult:
+    tracker = _CodexCompletionTracker()
+    chunks: list[bytes] = []
+    bytes_read = 0
+    started = time.monotonic()
+    exceeded_probe = mode == "buffered"
+    probe_seconds = int(get("codex_hybrid_probe_seconds") or 0)
+    probe_bytes = int(get("codex_hybrid_probe_bytes") or 262144)
+
+    try:
+        async for chunk, _ in upstream_resp.content.iter_chunks():
+            if not chunk:
+                continue
+            chunks.append(chunk)
+            bytes_read += len(chunk)
+            tracker.feed(chunk)
+            if mode == "hybrid" and not exceeded_probe:
+                elapsed = time.monotonic() - started
+                exceeded_probe = bytes_read >= probe_bytes or elapsed >= probe_seconds
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        raise _RetryableStreamError(str(e), bytes_read=bytes_read, completed=tracker.completed) from e
+
+    if not bytes_read:
+        raise _RetryableStreamError("empty codex response stream", bytes_read=0, completed=False)
+    if not tracker.completed:
+        raise _RetryableStreamError(
+            "stream closed before response.completed",
+            bytes_read=bytes_read,
+            completed=False,
+        )
+
+    if mode == "buffered":
+        stream_mode = "buffered"
+    elif exceeded_probe:
+        stream_mode = "hybrid-buffered"
+    else:
+        stream_mode = "hybrid-probe-complete"
+    return _BufferedStreamResult(
+        body=b"".join(chunks),
+        bytes_read=bytes_read,
+        completed=True,
+        stream_mode=stream_mode,
+    )
+
+
+async def _connect_codex_upstream_websocket(
+    request: web.Request,
+    pool: AccountPool,
+    upstream_session: aiohttp.ClientSession,
+    request_id: str,
+    path: str,
+) -> tuple[Optional[_WebSocketConnectResult], list[dict], Optional[web.Response]]:
+    base_headers = _clean_websocket_headers(dict(request.headers))
+    protocols = _websocket_protocols(dict(request.headers))
+    target_url = _websocket_target_url(path, request.query_string)
+    cooldown = get("rate_limit_cooldown")
+    max_retries = get("max_retries")
+    tried_accounts: set[str] = set()
+    attempts: list[dict] = []
+
+    for retry_idx in range(max_retries):
+        account = pool.pick(exclude=tried_accounts)
+        if account is None:
+            if tried_accounts:
+                return None, attempts, _upstream_failure_response(request_id, path, attempts)
+            return None, attempts, web.Response(
+                status=429,
+                text='{"error": "all accounts rate-limited"}',
+                content_type="application/json",
+                headers={"x-request-id": request_id},
+            )
+
+        tried_accounts.add(account.name)
+        headers = _account_headers(base_headers, account, _codex_upstream_path(path))
+        for auth_attempt in range(2):
+            started = time.monotonic()
+            try:
+                upstream_ws = await upstream_session.ws_connect(
+                    target_url,
+                    headers=headers,
+                    protocols=protocols,
+                    timeout=aiohttp.ClientWSTimeout(
+                        ws_receive=None,
+                        ws_close=int(get("upstream_connect_timeout_sec") or 10),
+                    ),
+                    receive_timeout=None,
+                    autoclose=True,
+                    autoping=True,
+                )
+                return _WebSocketConnectResult(
+                    account=account,
+                    upstream_ws=upstream_ws,
+                    retry_idx=retry_idx,
+                    started=started,
+                    attempts=attempts,
+                ), attempts, None
+            except aiohttp.WSServerHandshakeError as e:
+                duration_ms = (time.monotonic() - started) * 1000
+                pool.record_request(
+                    account,
+                    path,
+                    e.status,
+                    duration_ms,
+                    retry_idx,
+                    request_id,
+                    transport="websocket",
+                )
+                if e.status == 401:
+                    logger.info("Account %s: websocket got 401, refreshing", account.name)
+                    pool.stats["auth_refreshes"] += 1
+                    if auth_attempt > 0:
+                        _record_attempt(
+                            attempts,
+                            account,
+                            "auth_failed",
+                            status=e.status,
+                            retry_index=retry_idx,
+                            transport="websocket",
+                        )
+                        pool.mark_rate_limited(account, 300, "auth_failed")
+                        break
+                    ok = await account.refresh()
+                    if not ok:
+                        _record_attempt(
+                            attempts,
+                            account,
+                            "auth_failed",
+                            status=e.status,
+                            retry_index=retry_idx,
+                            transport="websocket",
+                        )
+                        pool.mark_rate_limited(account, 300, "auth_failed")
+                        break
+                    headers["Authorization"] = f"Bearer {account.access_token}"
+                    continue
+
+                if e.status == 429:
+                    retry_after = _retry_after_seconds(e.headers.get("Retry-After") if e.headers else None)
+                    _record_attempt(
+                        attempts,
+                        account,
+                        "rate_limit_429",
+                        status=e.status,
+                        retry_after=retry_after,
+                        retry_index=retry_idx,
+                        transport="websocket",
+                    )
+                    pool.mark_rate_limited(account, retry_after or cooldown, "rate_limit_429")
+                    break
+
+                detail = f"ws_handshake_failed: status={e.status}; message={e.message}"
+                _record_attempt(
+                    attempts,
+                    account,
+                    "ws_handshake_failed",
+                    status=e.status,
+                    error=e.message,
+                    retry_index=retry_idx,
+                    transport="websocket",
+                )
+                pool.record_error(path, detail, account, request_id, retry_idx)
+                break
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                detail = f"ws_handshake_failed: {e}"
+                _record_attempt(
+                    attempts,
+                    account,
+                    "ws_handshake_failed",
+                    error=str(e),
+                    retry_index=retry_idx,
+                    transport="websocket",
+                )
+                pool.record_error(path, detail, account, request_id, retry_idx)
+                break
+
+    return None, attempts, _upstream_failure_response(request_id, path, attempts, "websocket upstream unavailable")
+
+
+async def _relay_websocket_pair(client_ws, upstream_ws) -> _WebSocketRelayResult:
+    tracker = _CodexCompletionTracker()
+    metrics = {
+        "messages": 0,
+        "bytes_forwarded": 0,
+        "completed": False,
+        "close_code": None,
+        "error": "",
+    }
+
+    async def upstream_to_client() -> None:
+        async for msg in upstream_ws:
+            if msg.type in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
+                metrics["messages"] += 1
+                metrics["bytes_forwarded"] += _ws_message_bytes(msg)
+                _feed_ws_completion(tracker, msg)
+                metrics["completed"] = tracker.completed
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    await client_ws.send_str(msg.data)
+                else:
+                    await client_ws.send_bytes(msg.data)
+            elif msg.type == aiohttp.WSMsgType.CLOSE:
+                break
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                metrics["error"] = str(upstream_ws.exception() or "upstream websocket error")
+                break
+        metrics["close_code"] = getattr(upstream_ws, "close_code", None)
+
+    async def client_to_upstream() -> None:
+        async for msg in client_ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                await upstream_ws.send_str(msg.data)
+            elif msg.type == aiohttp.WSMsgType.BINARY:
+                await upstream_ws.send_bytes(msg.data)
+            elif msg.type == aiohttp.WSMsgType.CLOSE:
+                break
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                break
+
+    upstream_task = asyncio.create_task(upstream_to_client())
+    client_task = asyncio.create_task(client_to_upstream())
+    done, pending = await asyncio.wait(
+        {upstream_task, client_task},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    origin = "upstream" if upstream_task in done else "client"
+    for task in pending:
+        task.cancel()
+    for task in pending:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    for task in done:
+        try:
+            await task
+        except Exception as e:
+            metrics["error"] = str(e)
+    return _WebSocketRelayResult(
+        origin=origin,
+        messages=int(metrics["messages"]),
+        bytes_forwarded=int(metrics["bytes_forwarded"]),
+        completed=bool(metrics["completed"]),
+        close_code=metrics["close_code"],
+        error=str(metrics["error"]),
+    )
+
+
+async def _handle_codex_websocket(
+    request: web.Request,
+    pool: AccountPool,
+    upstream_session: aiohttp.ClientSession,
+    request_id: str,
+    path: str,
+) -> web.StreamResponse:
+    client_ws = web.WebSocketResponse(
+        protocols=_websocket_protocols(dict(request.headers)),
+    )
+    client_ws.headers["x-request-id"] = request_id
+    try:
+        await client_ws.prepare(request)
+    except (AssertionError, ConnectionResetError, RuntimeError) as e:
+        detail = f"ws_client_disconnected_before_prepare: {e}"
+        pool.record_error(path, detail, None, request_id, 0)
+        return web.Response(status=499, headers={"x-request-id": request_id})
+
+    connected, attempts, failure = await _connect_codex_upstream_websocket(
+        request,
+        pool,
+        upstream_session,
+        request_id,
+        path,
+    )
+    if failure is not None:
+        detail = (
+            "ws_handshake_failed: websocket upstream unavailable; "
+            f"attempts={len(attempts)}"
+        )
+        pool.record_error(path, detail, None, request_id, len(attempts))
+        await _close_websocket_safely(
+            client_ws,
+            code=aiohttp.WSCloseCode.TRY_AGAIN_LATER,
+            message=detail,
+        )
+        return client_ws
+
+    account = connected.account
+    upstream_ws = connected.upstream_ws
+    if getattr(client_ws, "closed", False):
+        await upstream_ws.close()
+        detail = "ws_client_disconnected: client websocket closed before upstream relay"
+        pool.record_error(path, detail, account, request_id, connected.retry_idx)
+        return client_ws
+
+    try:
+        result = await _relay_websocket_pair(client_ws, upstream_ws)
+    finally:
+        await upstream_ws.close()
+        await _close_websocket_safely(client_ws, code=aiohttp.WSCloseCode.OK)
+
+    duration_ms = (time.monotonic() - connected.started) * 1000
+    pool.record_request(
+        account,
+        path,
+        101,
+        duration_ms,
+        connected.retry_idx,
+        request_id,
+        transport="websocket",
+    )
+    if result.origin == "upstream" and not result.completed:
+        _record_attempt(
+            attempts,
+            account,
+            "ws_stream_interrupted",
+            messages=result.messages,
+            bytes_forwarded=result.bytes_forwarded,
+            response_completed=result.completed,
+            close_code=result.close_code,
+            error=result.error or "websocket closed before response.completed",
+            retry_index=connected.retry_idx,
+            transport="websocket",
+        )
+        _record_ws_stream_interrupted(
+            pool,
+            account,
+            path,
+            request_id,
+            connected.retry_idx,
+            result,
+            _codex_stream_retry_cooldown(),
+        )
+    elif result.origin == "client" and not result.completed:
+        detail = _websocket_error_detail(
+            "ws_client_disconnected",
+            result.error or "client websocket closed",
+            result.messages,
+            result.bytes_forwarded,
+            result.completed,
+            result.close_code,
+        )
+        pool.record_error(path, detail, account, request_id, connected.retry_idx)
+    return client_ws
+
+
 async def handle(
     request: web.Request,
     pool: AccountPool,
@@ -244,6 +904,8 @@ async def _handle_with_session(
         resp = _models_response(request_id, path)
         pool.record_local_request(path, resp.status, (time.monotonic() - started) * 1000, request_id)
         return resp
+    if _is_codex_responses_path(path) and _is_websocket_request(request):
+        return await _handle_codex_websocket(request, pool, upstream_session, request_id, path)
     if _is_openai_inference_path(path):
         started = time.monotonic()
         resp = web.json_response(
@@ -271,9 +933,7 @@ async def _handle_with_session(
             headers={"x-request-id": request_id},
         )
 
-    target_url = f"{upstream}{path}"
-    if request.query_string:
-        target_url += f"?{request.query_string}"
+    target_url = _target_url(upstream, path, request.query_string)
 
     max_body_bytes = int(get("max_request_body_mb") or 50) * 1024 * 1024
     content_length = request.content_length
@@ -398,20 +1058,33 @@ async def _handle_with_session(
                                     headers=_response_headers(upstream_resp, request_id),
                                 )
 
-                            resp = web.StreamResponse(
-                                status=upstream_resp.status,
-                                headers=_response_headers(upstream_resp, request_id),
-                            )
-
-                            duration_ms = (time.monotonic() - started) * 1000
-                            try:
-                                await resp.prepare(request)
-                                async for chunk, _ in upstream_resp.content.iter_chunks():
-                                    await resp.write(chunk)
-                                await resp.write_eof()
-                            except (ConnectionResetError, aiohttp.ClientError, asyncio.TimeoutError) as e:
-                                logger.info(f"stream ended early request_id={request_id}: {e}")
-                                pool.record_error(path, f"stream_interrupted: {e}", account, request_id, retry_idx)
+                            codex_stream_mode = _codex_stream_mode() if _is_codex_responses_path(path) else ""
+                            if codex_stream_mode and codex_stream_mode != "realtime":
+                                try:
+                                    buffered = await _fetch_complete_codex_stream(upstream_resp, codex_stream_mode)
+                                except _RetryableStreamError as e:
+                                    _record_attempt(
+                                        attempts,
+                                        account,
+                                        "stream_interrupted",
+                                        error=str(e),
+                                        bytes_read=e.bytes_read,
+                                        response_completed=e.completed,
+                                        stream_mode=codex_stream_mode,
+                                        retry_index=retry_idx,
+                                    )
+                                    _record_buffered_stream_interrupted(
+                                        pool,
+                                        account,
+                                        path,
+                                        request_id,
+                                        retry_idx,
+                                        e,
+                                        codex_stream_mode,
+                                        _codex_stream_retry_cooldown(),
+                                    )
+                                    raise
+                                duration_ms = (time.monotonic() - started) * 1000
                                 pool.record_request(
                                     account,
                                     path,
@@ -419,6 +1092,267 @@ async def _handle_with_session(
                                     duration_ms,
                                     retry_idx,
                                     request_id,
+                                    buffered.stream_mode,
+                                    _http_transport_label(codex_stream_mode),
+                                )
+                                return web.Response(
+                                    status=upstream_resp.status,
+                                    body=buffered.body,
+                                    headers=_response_headers(upstream_resp, request_id),
+                                )
+
+                            resp = web.StreamResponse(
+                                status=upstream_resp.status,
+                                headers=_response_headers(upstream_resp, request_id),
+                            )
+
+                            active_stream_mode = "realtime" if codex_stream_mode == "realtime" else ""
+                            active_transport = _http_transport_label(codex_stream_mode)
+                            stream_cooldown = _codex_stream_retry_cooldown() if codex_stream_mode else cooldown
+                            tracker = _CodexCompletionTracker() if _is_codex_responses_path(path) else None
+                            chunks = upstream_resp.content.iter_chunks().__aiter__()
+                            bytes_forwarded = 0
+                            response_prepared = False
+                            try:
+                                try:
+                                    first_chunk, _ = await chunks.__anext__()
+                                except StopAsyncIteration:
+                                    first_chunk = b""
+                                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                                    raise _RetryableStreamError(str(e)) from e
+
+                                if tracker:
+                                    tracker.feed(first_chunk)
+                                if tracker and not first_chunk and not tracker.completed:
+                                    raise _RetryableStreamError("stream closed before response.completed")
+
+                                await resp.prepare(request)
+                                response_prepared = True
+                                if first_chunk:
+                                    try:
+                                        await resp.write(first_chunk)
+                                    except ConnectionResetError as e:
+                                        completed = bool(tracker and tracker.completed)
+                                        _record_client_disconnect(
+                                            pool,
+                                            account,
+                                            path,
+                                            request_id,
+                                            retry_idx,
+                                            str(e),
+                                            bytes_forwarded,
+                                            completed,
+                                        )
+                                        duration_ms = (time.monotonic() - started) * 1000
+                                        pool.record_request(
+                                            account,
+                                            path,
+                                            upstream_resp.status,
+                                            duration_ms,
+                                            retry_idx,
+                                            request_id,
+                                            active_stream_mode,
+                                            active_transport,
+                                        )
+                                        return resp
+                                    bytes_forwarded += len(first_chunk)
+
+                                while True:
+                                    try:
+                                        chunk, _ = await chunks.__anext__()
+                                    except StopAsyncIteration:
+                                        break
+                                    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                                        completed = bool(tracker and tracker.completed)
+                                        _record_stream_interrupted(
+                                            pool,
+                                            account,
+                                            path,
+                                            request_id,
+                                            retry_idx,
+                                            str(e),
+                                            bytes_forwarded,
+                                            completed,
+                                            stream_cooldown,
+                                        )
+                                        duration_ms = (time.monotonic() - started) * 1000
+                                        pool.record_request(
+                                            account,
+                                            path,
+                                            upstream_resp.status,
+                                            duration_ms,
+                                            retry_idx,
+                                            request_id,
+                                            active_stream_mode,
+                                            active_transport,
+                                        )
+                                        return resp
+
+                                    if tracker:
+                                        tracker.feed(chunk)
+                                    if not chunk:
+                                        continue
+                                    try:
+                                        await resp.write(chunk)
+                                    except ConnectionResetError as e:
+                                        completed = bool(tracker and tracker.completed)
+                                        _record_client_disconnect(
+                                            pool,
+                                            account,
+                                            path,
+                                            request_id,
+                                            retry_idx,
+                                            str(e),
+                                            bytes_forwarded,
+                                            completed,
+                                        )
+                                        duration_ms = (time.monotonic() - started) * 1000
+                                        pool.record_request(
+                                            account,
+                                            path,
+                                            upstream_resp.status,
+                                            duration_ms,
+                                            retry_idx,
+                                            request_id,
+                                            active_stream_mode,
+                                            active_transport,
+                                        )
+                                        return resp
+                                    bytes_forwarded += len(chunk)
+
+                                if tracker and not tracker.completed:
+                                    error = "stream closed before response.completed"
+                                    if bytes_forwarded == 0:
+                                        raise _RetryableStreamError(error)
+                                    _record_stream_interrupted(
+                                        pool,
+                                        account,
+                                        path,
+                                        request_id,
+                                        retry_idx,
+                                        error,
+                                        bytes_forwarded,
+                                        False,
+                                        stream_cooldown,
+                                    )
+                                    duration_ms = (time.monotonic() - started) * 1000
+                                    pool.record_request(
+                                        account,
+                                        path,
+                                        upstream_resp.status,
+                                        duration_ms,
+                                        retry_idx,
+                                        request_id,
+                                        active_stream_mode,
+                                        active_transport,
+                                    )
+                                    try:
+                                        await resp.write_eof()
+                                    except ConnectionResetError:
+                                        pass
+                                    return resp
+
+                                try:
+                                    await resp.write_eof()
+                                except ConnectionResetError as e:
+                                    completed = bool(tracker and tracker.completed)
+                                    _record_client_disconnect(
+                                        pool,
+                                        account,
+                                        path,
+                                        request_id,
+                                        retry_idx,
+                                        str(e),
+                                        bytes_forwarded,
+                                        completed,
+                                    )
+                                    duration_ms = (time.monotonic() - started) * 1000
+                                    pool.record_request(
+                                        account,
+                                        path,
+                                        upstream_resp.status,
+                                        duration_ms,
+                                        retry_idx,
+                                        request_id,
+                                        active_stream_mode,
+                                        active_transport,
+                                    )
+                                    return resp
+                            except _RetryableStreamError as e:
+                                if response_prepared:
+                                    completed = bool(tracker and tracker.completed)
+                                    _record_stream_interrupted(
+                                        pool,
+                                        account,
+                                        path,
+                                        request_id,
+                                        retry_idx,
+                                        str(e),
+                                        bytes_forwarded,
+                                        completed,
+                                        stream_cooldown,
+                                    )
+                                    duration_ms = (time.monotonic() - started) * 1000
+                                    pool.record_request(
+                                        account,
+                                        path,
+                                        upstream_resp.status,
+                                        duration_ms,
+                                        retry_idx,
+                                        request_id,
+                                        active_stream_mode,
+                                        active_transport,
+                                    )
+                                    return resp
+                                _record_attempt(
+                                    attempts,
+                                    account,
+                                    "stream_interrupted_before_response",
+                                    error=str(e),
+                                    retry_index=retry_idx,
+                                )
+                                pool.record_error(
+                                    path,
+                                    _stream_error_detail(
+                                        "stream_interrupted_before_response",
+                                        str(e),
+                                        bytes_forwarded,
+                                        bool(tracker and tracker.completed),
+                                    ),
+                                    account,
+                                    request_id,
+                                    retry_idx,
+                                )
+                                logger.warning(
+                                    "stream failed before response request_id=%s account=%s "
+                                    "path=%s error=%s",
+                                    request_id,
+                                    account.name,
+                                    path,
+                                    e,
+                                )
+                                raise
+                            except ConnectionResetError as e:
+                                completed = bool(tracker and tracker.completed)
+                                _record_client_disconnect(
+                                    pool,
+                                    account,
+                                    path,
+                                    request_id,
+                                    retry_idx,
+                                    str(e),
+                                    bytes_forwarded,
+                                    completed,
+                                )
+                                pool.record_request(
+                                    account,
+                                    path,
+                                    upstream_resp.status,
+                                    (time.monotonic() - started) * 1000,
+                                    retry_idx,
+                                    request_id,
+                                    active_stream_mode,
+                                    active_transport,
                                 )
                                 return resp
                             duration_ms = (time.monotonic() - started) * 1000
@@ -429,6 +1363,8 @@ async def _handle_with_session(
                                 duration_ms,
                                 retry_idx,
                                 request_id,
+                                active_stream_mode,
+                                active_transport,
                             )
                             return resp
                     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
@@ -454,6 +1390,8 @@ async def _handle_with_session(
                     continue
                 break
 
+        except _RetryableStreamError:
+            continue
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"upstream error: {e}")
             _record_attempt(

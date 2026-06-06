@@ -56,6 +56,7 @@ button:hover{border-color:var(--blue)}
     <div class="card"><div class="num" id="accounts">-</div><div class="label">可用账号 / 总账号</div></div>
     <div class="card"><div class="num" id="strategy">-</div><div class="label">选择策略</div></div>
     <div class="card"><div class="num" id="requests">-</div><div class="label">总请求</div></div>
+    <div class="card"><div class="num" id="stream-mode">-</div><div class="label">Codex 流模式</div></div>
   </section>
 
   <section class="card">
@@ -114,16 +115,19 @@ function renderStatus(status) {
   document.getElementById('accounts').textContent = `${status.active_accounts ?? '-'} / ${status.total_accounts ?? '-'}`;
   document.getElementById('strategy').textContent = status.strategy || '-';
   document.getElementById('requests').textContent = status.stats?.total_requests ?? '-';
+  document.getElementById('stream-mode').textContent = status.config?.codex_stream_mode || status.codex_stream_mode || '-';
 
   const rows = (status.recent_requests || []).slice(0, 12);
   if (!rows.length) {
     document.getElementById('recent').innerHTML = '<p>暂无请求记录。</p>';
   } else {
-    document.getElementById('recent').innerHTML = `<table><thead><tr><th>时间</th><th>账号</th><th>状态</th><th>路径</th><th>ID</th></tr></thead><tbody>${
+    document.getElementById('recent').innerHTML = `<table><thead><tr><th>时间</th><th>账号</th><th>状态</th><th>传输</th><th>流</th><th>路径</th><th>ID</th></tr></thead><tbody>${
       rows.map(row => `<tr>
         <td>${esc(row.at ? new Date(row.at * 1000).toLocaleTimeString() : '-')}</td>
         <td>${esc(row.account || '-')}</td>
         <td>${statusLabel(row.status)}</td>
+        <td>${esc(row.transport || '-')}</td>
+        <td>${esc(row.stream_mode || '-')}</td>
         <td><code>${esc(row.path || '-')}</code></td>
         <td><code>${esc(row.request_id || '-')}</code></td>
       </tr>`).join('')

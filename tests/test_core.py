@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import aiohttp
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src" / "core"))
 sys.path.insert(0, str(ROOT / "platforms" / "mac"))
@@ -17,20 +19,38 @@ import codex_config
 import login_manager
 import control_actions
 import proxy
+import proxy_core
 import quota_tracker
 import service_manager
 from account_manager import Account, AccountNameError, AccountPool, validate_account_name
 from config import ConfigError, validate
 from proxy_core import (
+    _CodexCompletionTracker,
+    _RetryableStreamError,
+    _WebSocketRelayResult,
+    _connect_codex_upstream_websocket,
+    _fetch_complete_codex_stream,
+    _handle_codex_websocket,
     _account_headers,
     _clean_headers,
+    _codex_stream_mode,
+    _codex_stream_retry_cooldown,
     _is_streaming_response,
     _should_stream_response,
     _is_models_path,
     _is_openai_inference_path,
+    _is_codex_responses_path,
+    _record_buffered_stream_interrupted,
+    _record_client_disconnect,
+    _record_stream_interrupted,
+    _record_ws_stream_interrupted,
+    _relay_websocket_pair,
     _retry_after_seconds,
+    _stream_error_detail,
+    _target_url,
     _upstream_failure_response,
     _upstream_timeout,
+    _websocket_target_url,
 )
 
 
@@ -42,6 +62,10 @@ class ConfigTests(unittest.TestCase):
             "upstream_connect_timeout_sec": "12",
             "upstream_transient_retries": "3",
             "upstream_transient_backoff_ms": "500",
+            "codex_stream_mode": "hybrid",
+            "codex_hybrid_probe_seconds": "8",
+            "codex_hybrid_probe_bytes": "262144",
+            "codex_stream_retry_cooldown": "60",
             "quota_tracker_enabled": "true",
             "quota_weight_5h": "0.8",
             "quota_weight_7d": "0.2",
@@ -51,6 +75,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg["upstream_connect_timeout_sec"], 12)
         self.assertEqual(cfg["upstream_transient_retries"], 3)
         self.assertEqual(cfg["upstream_transient_backoff_ms"], 500)
+        self.assertEqual(cfg["codex_stream_mode"], "hybrid")
+        self.assertEqual(cfg["codex_hybrid_probe_seconds"], 8)
+        self.assertEqual(cfg["codex_hybrid_probe_bytes"], 262144)
+        self.assertEqual(cfg["codex_stream_retry_cooldown"], 60)
         self.assertTrue(cfg["quota_tracker_enabled"])
         self.assertEqual(cfg["quota_weight_5h"], 0.8)
         self.assertEqual(cfg["quota_weight_7d"], 0.2)
@@ -62,6 +90,10 @@ class ConfigTests(unittest.TestCase):
     def test_validate_rejects_unknown_strategy(self):
         with self.assertRaises(ConfigError):
             validate({"rotation_strategy": "least_used"})
+
+    def test_validate_rejects_unknown_codex_stream_mode(self):
+        with self.assertRaises(ConfigError):
+            validate({"codex_stream_mode": "sometimes"})
 
     def test_validate_rejects_zero_quota_weights(self):
         with self.assertRaises(ConfigError):
@@ -449,13 +481,127 @@ class ProxyStatusTests(unittest.TestCase):
         refresh.assert_called_once_with(proxy.pool)
 
 
-class ProxyCoreTests(unittest.TestCase):
+class _FakeChunkContent:
+    def __init__(self, chunks, error=None):
+        self.chunks = list(chunks)
+        self.error = error
+        self.index = 0
+
+    def iter_chunks(self):
+        return self
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.index < len(self.chunks):
+            chunk = self.chunks[self.index]
+            self.index += 1
+            return chunk, False
+        if self.error:
+            error = self.error
+            self.error = None
+            raise error
+        raise StopAsyncIteration
+
+
+class _FakeUpstreamResponse:
+    def __init__(self, chunks, error=None):
+        self.content = _FakeChunkContent(chunks, error)
+
+
+class _FakeRequest:
+    def __init__(self, headers=None, query_string="", order=None):
+        self.headers = headers or {}
+        self.query_string = query_string
+        self.order = order
+
+
+class _FakeWebSocket:
+    def __init__(self, messages=None, close_code=None, error=None, order=None, prepare_error=None):
+        self.messages = list(messages or [])
+        self.close_code = close_code
+        self.error = error
+        self.headers = {}
+        self.sent = []
+        self.closed = False
+        self.index = 0
+        self.order = order
+        self.prepare_error = prepare_error
+        self.prepared = False
+        self.close_args = None
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.index < len(self.messages):
+            msg = self.messages[self.index]
+            self.index += 1
+            return msg
+        raise StopAsyncIteration
+
+    async def send_str(self, data):
+        self.sent.append(("text", data))
+
+    async def send_bytes(self, data):
+        self.sent.append(("binary", data))
+
+    async def close(self, *args, **kwargs):
+        self.closed = True
+        self.close_args = (args, kwargs)
+
+    async def prepare(self, request):
+        if self.order is not None:
+            self.order.append("prepare")
+        if self.prepare_error:
+            raise self.prepare_error
+        self.prepared = True
+        return self
+
+    def exception(self):
+        return self.error
+
+
+class _FakeWSSession:
+    def __init__(self, outcomes, order=None):
+        self.outcomes = list(outcomes)
+        self.calls = []
+        self.order = order
+
+    async def ws_connect(self, url, **kwargs):
+        if self.order is not None:
+            self.order.append("connect")
+        self.calls.append((url, kwargs))
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+class ProxyCoreRoutingTests(unittest.TestCase):
     def test_codex_responses_2xx_streams_even_with_json_content_type(self):
         response = mock.Mock()
         response.status = 200
         response.headers = {"Content-Type": "application/json"}
 
         self.assertTrue(_should_stream_response("/backend-api/codex/responses", response))
+
+    def test_v1_responses_maps_to_chatgpt_codex_upstream(self):
+        response = mock.Mock()
+        response.status = 200
+        response.headers = {"Content-Type": "application/json"}
+
+        self.assertTrue(_is_codex_responses_path("/v1/responses"))
+        self.assertTrue(_should_stream_response("/v1/responses", response))
+        self.assertEqual(
+            _target_url("https://chatgpt.com", "/v1/responses", "foo=bar"),
+            "https://chatgpt.com/backend-api/codex/responses?foo=bar",
+        )
+        self.assertEqual(
+            _websocket_target_url("/v1/responses"),
+            "wss://chatgpt.com/backend-api/codex/responses",
+        )
 
     def test_non_codex_json_response_does_not_force_streaming(self):
         response = mock.Mock()
@@ -685,6 +831,17 @@ class ProxyCoreTests(unittest.TestCase):
         self.assertEqual(headers["Sec-Fetch-Site"], "same-origin")
         self.assertEqual(headers["chatgpt-account-id"], "selected-account")
 
+    def test_v1_responses_headers_are_chatgpt_web_compatible(self):
+        account = Account("picked", Path(tempfile.mkdtemp()) / "auth.json")
+        account.access_token = "selected-token"
+        account.account_id = "selected-account"
+
+        headers = _account_headers({"User-Agent": "codex-cli"}, account, "/v1/responses")
+
+        self.assertIn("Mozilla/5.0", headers["User-Agent"])
+        self.assertEqual(headers["Origin"], "https://chatgpt.com")
+        self.assertEqual(headers["chatgpt-account-id"], "selected-account")
+
     def test_v1_headers_do_not_force_chatgpt_web_headers(self):
         account = Account("picked", Path(tempfile.mkdtemp()) / "auth.json")
         account.access_token = "selected-token"
@@ -711,15 +868,416 @@ class ProxyCoreTests(unittest.TestCase):
         self.assertTrue(_is_streaming_response(streaming))
         self.assertFalse(_is_streaming_response(regular))
 
+    def test_codex_completion_tracker_detects_single_chunk_marker(self):
+        tracker = _CodexCompletionTracker()
+
+        self.assertTrue(tracker.feed(b'event: response.completed\ndata: {}\n\n'))
+        self.assertTrue(tracker.completed)
+
+    def test_codex_completion_tracker_detects_split_marker(self):
+        tracker = _CodexCompletionTracker()
+
+        self.assertFalse(tracker.feed(b"event: response.comp"))
+        self.assertTrue(tracker.feed(b"leted\ndata: {}\n\n"))
+        self.assertTrue(tracker.completed)
+
+    def test_codex_completion_tracker_reports_missing_marker(self):
+        tracker = _CodexCompletionTracker()
+
+        tracker.feed(b"event: response.output_text.delta\n")
+        tracker.feed(b"data: partial\n\n")
+
+        self.assertFalse(tracker.completed)
+
+    def test_stream_interruption_records_error_and_cools_account(self):
+        pool = AccountPool()
+        account = Account("tmp", Path(tempfile.mkdtemp()) / "auth.json")
+
+        _record_stream_interrupted(
+            pool,
+            account,
+            "/backend-api/codex/responses",
+            "rid-stream",
+            0,
+            "Response payload is not completed",
+            128,
+            False,
+            60,
+        )
+
+        self.assertTrue(account.is_rate_limited)
+        self.assertEqual(account.cooldown_reason, "stream_interrupted")
+        self.assertIn("bytes_forwarded=128", pool.recent_errors[0]["error"])
+        self.assertIn("response_completed=False", pool.recent_errors[0]["error"])
+
+    def test_client_disconnect_records_error_without_cooldown(self):
+        pool = AccountPool()
+        account = Account("tmp", Path(tempfile.mkdtemp()) / "auth.json")
+
+        _record_client_disconnect(
+            pool,
+            account,
+            "/backend-api/codex/responses",
+            "rid-client",
+            0,
+            "Cannot write to closing transport",
+            256,
+            True,
+        )
+
+        self.assertFalse(account.is_rate_limited)
+        self.assertEqual(account.cooldown_reason, "")
+        self.assertIn("client_disconnected", pool.recent_errors[0]["error"])
+        self.assertIn("bytes_forwarded=256", pool.recent_errors[0]["error"])
+
+    def test_stream_error_detail_includes_completion_diagnostics(self):
+        detail = _stream_error_detail(
+            "stream_interrupted",
+            "Not enough data to satisfy transfer length header",
+            42,
+            False,
+        )
+
+        self.assertIn("bytes_forwarded=42", detail)
+        self.assertIn("response_completed=False", detail)
+
     def test_models_path_is_served_locally(self):
         self.assertTrue(_is_models_path("/v1/models"))
         self.assertTrue(_is_models_path("/v1/models/gpt-5.5"))
         self.assertFalse(_is_models_path("/v1/responses"))
 
     def test_openai_inference_path_is_blocked_for_chatgpt_tokens(self):
-        self.assertTrue(_is_openai_inference_path("/v1/responses"))
+        self.assertFalse(_is_openai_inference_path("/v1/responses"))
         self.assertTrue(_is_openai_inference_path("/v1/chat/completions"))
         self.assertFalse(_is_openai_inference_path("/backend-api/codex/responses"))
+
+    def test_record_request_keeps_stream_mode(self):
+        pool = AccountPool()
+        account = Account("tmp", Path(tempfile.mkdtemp()) / "auth.json")
+
+        pool.record_request(
+            account,
+            "/backend-api/codex/responses",
+            200,
+            12.3,
+            1,
+            "rid-mode",
+            "hybrid-buffered",
+            "http-hybrid",
+        )
+
+        self.assertEqual(pool.recent_requests[0]["stream_mode"], "hybrid-buffered")
+        self.assertEqual(pool.recent_requests[0]["transport"], "http-hybrid")
+
+    def test_codex_stream_mode_defaults_invalid_values_to_hybrid(self):
+        with mock.patch("proxy_core.get", return_value="sometimes"):
+            self.assertEqual(_codex_stream_mode(), "hybrid")
+
+    def test_codex_stream_retry_cooldown_falls_back_to_rate_limit(self):
+        def fake_get(key):
+            return {
+                "codex_stream_retry_cooldown": 0,
+                "rate_limit_cooldown": 77,
+            }.get(key)
+
+        with mock.patch("proxy_core.get", side_effect=fake_get):
+            self.assertEqual(_codex_stream_retry_cooldown(), 77)
+
+    def test_fetch_complete_codex_stream_buffers_completed_response(self):
+        response = _FakeUpstreamResponse([
+            b"event: response.output_text.delta\ndata: x\n\n",
+            b"event: response.completed\ndata: {}\n\n",
+        ])
+
+        result = asyncio.run(_fetch_complete_codex_stream(response, "buffered"))
+
+        self.assertTrue(result.completed)
+        self.assertEqual(result.stream_mode, "buffered")
+        self.assertIn(b"response.completed", result.body)
+        self.assertEqual(result.bytes_read, len(result.body))
+
+    def test_fetch_complete_codex_stream_detects_split_completion_marker(self):
+        response = _FakeUpstreamResponse([
+            b"event: response.comp",
+            b"leted\ndata: {}\n\n",
+        ])
+
+        result = asyncio.run(_fetch_complete_codex_stream(response, "buffered"))
+
+        self.assertTrue(result.completed)
+        self.assertIn(b"response.completed", result.body)
+
+    def test_fetch_complete_codex_stream_raises_without_completion(self):
+        response = _FakeUpstreamResponse([
+            b"event: response.output_text.delta\ndata: partial\n\n",
+        ])
+
+        with self.assertRaises(_RetryableStreamError) as exc:
+            asyncio.run(_fetch_complete_codex_stream(response, "buffered"))
+
+        self.assertGreater(exc.exception.bytes_read, 0)
+        self.assertFalse(exc.exception.completed)
+
+    def test_fetch_complete_codex_stream_raises_on_payload_error(self):
+        response = _FakeUpstreamResponse(
+            [b"event: response.output_text.delta\ndata: partial\n\n"],
+            error=aiohttp.ClientPayloadError("not enough data"),
+        )
+
+        with self.assertRaises(_RetryableStreamError) as exc:
+            asyncio.run(_fetch_complete_codex_stream(response, "buffered"))
+
+        self.assertGreater(exc.exception.bytes_read, 0)
+        self.assertFalse(exc.exception.completed)
+
+    def test_fetch_complete_codex_stream_marks_hybrid_buffered_after_probe(self):
+        def fake_get(key):
+            return {
+                "codex_hybrid_probe_seconds": 8,
+                "codex_hybrid_probe_bytes": 4,
+            }.get(key)
+
+        response = _FakeUpstreamResponse([
+            b"12345",
+            b"event: response.completed\ndata: {}\n\n",
+        ])
+
+        with mock.patch("proxy_core.get", side_effect=fake_get):
+            result = asyncio.run(_fetch_complete_codex_stream(response, "hybrid"))
+
+        self.assertEqual(result.stream_mode, "hybrid-buffered")
+
+    def test_fetch_complete_codex_stream_marks_short_hybrid_probe_complete(self):
+        def fake_get(key):
+            return {
+                "codex_hybrid_probe_seconds": 120,
+                "codex_hybrid_probe_bytes": 1024,
+            }.get(key)
+
+        response = _FakeUpstreamResponse([
+            b"event: response.completed\ndata: {}\n\n",
+        ])
+
+        with mock.patch("proxy_core.get", side_effect=fake_get):
+            result = asyncio.run(_fetch_complete_codex_stream(response, "hybrid"))
+
+        self.assertEqual(result.stream_mode, "hybrid-probe-complete")
+
+    def test_buffered_stream_interruption_records_error_and_cools_account(self):
+        pool = AccountPool()
+        account = Account("tmp", Path(tempfile.mkdtemp()) / "auth.json")
+        error = _RetryableStreamError("stream closed", bytes_read=512, completed=False)
+
+        _record_buffered_stream_interrupted(
+            pool,
+            account,
+            "/backend-api/codex/responses",
+            "rid-buffered",
+            2,
+            error,
+            "hybrid",
+            60,
+        )
+
+        self.assertTrue(account.is_rate_limited)
+        self.assertEqual(account.cooldown_reason, "stream_interrupted")
+        self.assertIn("bytes_read=512", pool.recent_errors[0]["error"])
+        self.assertIn("stream_mode=hybrid", pool.recent_errors[0]["error"])
+
+    def test_websocket_handshake_429_cools_and_switches_account(self):
+        pool = AccountPool()
+        root = Path(tempfile.mkdtemp())
+        account_a = Account("a", root / "a" / "auth.json")
+        account_a.access_token = "token-a"
+        account_b = Account("b", root / "b" / "auth.json")
+        account_b.access_token = "token-b"
+        pool.accounts = [account_a, account_b]
+        handshake_429 = aiohttp.WSServerHandshakeError(
+            None,
+            (),
+            status=429,
+            message="Too Many Requests",
+            headers={"Retry-After": "12"},
+        )
+        upstream_ws = _FakeWebSocket()
+        session = _FakeWSSession([handshake_429, upstream_ws])
+
+        connected, attempts, failure = asyncio.run(_connect_codex_upstream_websocket(
+            _FakeRequest(headers={"Sec-WebSocket-Protocol": "chatgpt"}),
+            pool,
+            session,
+            "rid-ws",
+            "/v1/responses",
+        ))
+
+        self.assertIsNone(failure)
+        self.assertEqual(connected.account.name, "b")
+        self.assertTrue(account_a.is_rate_limited)
+        self.assertEqual(account_a.cooldown_reason, "rate_limit_429")
+        self.assertEqual(attempts[0]["reason"], "rate_limit_429")
+        self.assertEqual(session.calls[0][0], "wss://chatgpt.com/backend-api/codex/responses")
+        self.assertEqual(session.calls[0][1]["protocols"], ["chatgpt"])
+
+    def test_websocket_handshake_401_refreshes_same_account(self):
+        pool = AccountPool()
+        account = Account("a", Path(tempfile.mkdtemp()) / "auth.json")
+        account.access_token = "old-token"
+        pool.accounts = [account]
+
+        async def fake_refresh():
+            account.access_token = "new-token"
+            return True
+
+        account.refresh = fake_refresh
+        handshake_401 = aiohttp.WSServerHandshakeError(
+            None,
+            (),
+            status=401,
+            message="Unauthorized",
+            headers={},
+        )
+        upstream_ws = _FakeWebSocket()
+        session = _FakeWSSession([handshake_401, upstream_ws])
+
+        connected, attempts, failure = asyncio.run(_connect_codex_upstream_websocket(
+            _FakeRequest(),
+            pool,
+            session,
+            "rid-auth",
+            "/v1/responses",
+        ))
+
+        self.assertIsNone(failure)
+        self.assertEqual(connected.account.name, "a")
+        self.assertEqual(attempts, [])
+        self.assertFalse(account.is_rate_limited)
+        self.assertEqual(session.calls[1][1]["headers"]["Authorization"], "Bearer new-token")
+
+    def test_codex_websocket_prepares_client_before_connecting_upstream(self):
+        pool = AccountPool()
+        account = Account("a", Path(tempfile.mkdtemp()) / "auth.json")
+        account.access_token = "token"
+        pool.accounts = [account]
+        order = []
+        client_ws = _FakeWebSocket(order=order)
+        session = _FakeWSSession([_FakeWebSocket()], order=order)
+        relay_result = _WebSocketRelayResult(
+            origin="upstream",
+            messages=1,
+            bytes_forwarded=64,
+            completed=True,
+            close_code=1000,
+            error="",
+        )
+
+        async def fake_relay(_client_ws, _upstream_ws):
+            return relay_result
+
+        with mock.patch("proxy_core.web.WebSocketResponse", return_value=client_ws), \
+                mock.patch("proxy_core._relay_websocket_pair", side_effect=fake_relay):
+            result = asyncio.run(_handle_codex_websocket(
+                _FakeRequest(headers={"Sec-WebSocket-Protocol": "chatgpt"}, order=order),
+                pool,
+                session,
+                "rid-ws-ok",
+                "/v1/responses",
+            ))
+
+        self.assertIs(result, client_ws)
+        self.assertEqual(order[:2], ["prepare", "connect"])
+        self.assertTrue(client_ws.prepared)
+        self.assertTrue(client_ws.closed)
+        self.assertEqual(pool.recent_requests[0]["path"], "/v1/responses")
+        self.assertEqual(pool.recent_requests[0]["status"], 101)
+        self.assertEqual(pool.recent_requests[0]["transport"], "websocket")
+
+    def test_codex_websocket_upstream_failure_closes_client_without_http_500(self):
+        pool = AccountPool()
+        account = Account("a", Path(tempfile.mkdtemp()) / "auth.json")
+        account.access_token = "token"
+        pool.accounts = [account]
+        client_ws = _FakeWebSocket()
+        session = _FakeWSSession([asyncio.TimeoutError("timeout")])
+
+        with mock.patch("proxy_core.web.WebSocketResponse", return_value=client_ws):
+            result = asyncio.run(_handle_codex_websocket(
+                _FakeRequest(),
+                pool,
+                session,
+                "rid-ws-fail",
+                "/v1/responses",
+            ))
+
+        self.assertIs(result, client_ws)
+        self.assertTrue(client_ws.prepared)
+        self.assertTrue(client_ws.closed)
+        self.assertEqual(client_ws.close_args[1]["code"], aiohttp.WSCloseCode.TRY_AGAIN_LATER)
+        self.assertIn("ws_handshake_failed", pool.recent_errors[0]["error"])
+        self.assertEqual(pool.recent_errors[0]["request_id"], "rid-ws-fail")
+
+    def test_codex_websocket_prepare_disconnect_records_error_without_cooldown(self):
+        pool = AccountPool()
+        account = Account("a", Path(tempfile.mkdtemp()) / "auth.json")
+        account.access_token = "token"
+        pool.accounts = [account]
+        client_ws = _FakeWebSocket(prepare_error=AssertionError("transport is not None"))
+        session = _FakeWSSession([_FakeWebSocket()])
+
+        with mock.patch("proxy_core.web.WebSocketResponse", return_value=client_ws):
+            result = asyncio.run(_handle_codex_websocket(
+                _FakeRequest(),
+                pool,
+                session,
+                "rid-ws-prepare",
+                "/v1/responses",
+            ))
+
+        self.assertEqual(result.status, 499)
+        self.assertEqual(session.calls, [])
+        self.assertFalse(account.is_rate_limited)
+        self.assertIn("ws_client_disconnected_before_prepare", pool.recent_errors[0]["error"])
+        self.assertEqual(pool.recent_errors[0]["request_id"], "rid-ws-prepare")
+
+    def test_websocket_relay_reports_upstream_close_without_completion(self):
+        upstream_ws = _FakeWebSocket([
+            aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, "event: response.output_text.delta\n", ""),
+        ], close_code=1006)
+        client_ws = _FakeWebSocket()
+
+        result = asyncio.run(_relay_websocket_pair(client_ws, upstream_ws))
+
+        self.assertEqual(result.origin, "upstream")
+        self.assertFalse(result.completed)
+        self.assertEqual(result.messages, 1)
+        self.assertGreater(result.bytes_forwarded, 0)
+        self.assertEqual(result.close_code, 1006)
+
+    def test_websocket_interruption_records_error_and_cools_account(self):
+        pool = AccountPool()
+        account = Account("tmp", Path(tempfile.mkdtemp()) / "auth.json")
+        result = _WebSocketRelayResult(
+            origin="upstream",
+            messages=2,
+            bytes_forwarded=128,
+            completed=False,
+            close_code=1006,
+            error="closed",
+        )
+
+        _record_ws_stream_interrupted(
+            pool,
+            account,
+            "/v1/responses",
+            "rid-ws-error",
+            0,
+            result,
+            60,
+        )
+
+        self.assertTrue(account.is_rate_limited)
+        self.assertEqual(account.cooldown_reason, "ws_stream_interrupted")
+        self.assertIn("ws_stream_interrupted", pool.recent_errors[0]["error"])
+        self.assertIn("messages=2", pool.recent_errors[0]["error"])
 
 
 class CodexConfigTests(unittest.TestCase):
@@ -732,14 +1290,16 @@ class CodexConfigTests(unittest.TestCase):
             "enabled = true\n"
             "\n"
             "[model_providers.codex-account-pool]\n"
-            'base_url = "http://127.0.0.1:8800/backend-api/codex"\n'
+            'base_url = "http://127.0.0.1:8800/v1"\n'
             'wire_api = "responses"\n'
+            "supports_websockets = true\n"
         )
 
         values = codex_config._read_values(config_path)
         self.assertEqual(values["model_provider"], "codex-account-pool")
         self.assertTrue(values['plugins."documents@openai-primary-runtime".enabled'])
         self.assertEqual(values["model_providers.codex-account-pool.wire_api"], "responses")
+        self.assertTrue(values["model_providers.codex-account-pool.supports_websockets"])
 
     def test_proxy_toggle_round_trip(self):
         config_path = Path(tempfile.mkdtemp()) / "config.toml"
@@ -756,11 +1316,30 @@ class CodexConfigTests(unittest.TestCase):
         self.assertIn('model_provider = "codex-account-pool"', text)
         self.assertIn('chatgpt_base_url = "http://127.0.0.1:8800/backend-api/"', text)
         self.assertIn('[model_providers.codex-account-pool]', text)
-        self.assertIn('base_url = "http://127.0.0.1:8800/backend-api/codex"', text)
+        self.assertIn('base_url = "http://127.0.0.1:8800/v1"', text)
         self.assertIn('wire_api = "responses"', text)
         self.assertIn('requires_openai_auth = true', text)
+        self.assertIn('supports_websockets = true', text)
         codex_config.set_enabled(False, config_path)
         self.assertFalse(codex_config.status(config_path)["enabled"])
+
+    def test_legacy_codex_backend_provider_is_not_current_enabled_mode(self):
+        config_path = Path(tempfile.mkdtemp()) / "config.toml"
+        config_path.write_text(
+            'model_provider = "codex-account-pool"\n'
+            'chatgpt_base_url = "http://127.0.0.1:8800/backend-api/"\n'
+            "[model_providers.codex-account-pool]\n"
+            'base_url = "http://127.0.0.1:8800/backend-api/codex"\n'
+            'wire_api = "responses"\n'
+            "requires_openai_auth = true\n"
+            "supports_websockets = false\n"
+        )
+
+        status = codex_config.status(config_path)
+
+        self.assertFalse(status["enabled"])
+        self.assertEqual(status["mode"], "legacy_codex_pool_provider")
+        self.assertTrue(status["legacy_provider_mode_enabled"])
 
     def test_ensure_enabled_does_not_rewrite_matching_config(self):
         config_path = Path(tempfile.mkdtemp()) / "config.toml"

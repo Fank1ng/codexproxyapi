@@ -408,6 +408,12 @@ async def api_status(request: web.Request) -> web.Response:
         "recent_requests": recent_requests,
         "recent_errors": list(pool.recent_errors),
         "quota_tracker": quota_status(request.app.get("quota_task")),
+        "config": {
+            "codex_stream_mode": get("codex_stream_mode"),
+            "codex_hybrid_probe_seconds": get("codex_hybrid_probe_seconds"),
+            "codex_hybrid_probe_bytes": get("codex_hybrid_probe_bytes"),
+            "codex_stream_retry_cooldown": get("codex_stream_retry_cooldown") or get("rate_limit_cooldown"),
+        },
         "model_proxy": {
             "observed": bool(recent_potential_quota_requests),
             "coverage": "potential_quota_path_observed" if recent_potential_quota_requests else "not_confirmed",
@@ -416,7 +422,8 @@ async def api_status(request: web.Request) -> web.Response:
             "recent_catalog_requests": recent_model_catalog_requests[:10],
             "recent_background_requests": recent_background_requests[:10],
             "hint": (
-                "Quota-consuming Codex traffic should appear as /backend-api/codex/responses. "
+                "Quota-consuming Codex traffic should appear as /v1/responses or "
+                "/backend-api/codex/responses. "
                 "Background paths such as /backend-api/wham, connectors, plugins, "
                 "and /backend-api/codex/analytics-events do not prove model traffic is pooled."
             ),

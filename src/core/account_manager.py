@@ -472,6 +472,8 @@ class AccountPool:
         duration_ms: float,
         retries: int,
         request_id: str = "",
+        stream_mode: str = "",
+        transport: str = "",
     ) -> None:
         self.stats["total_requests"] += 1
         if status == 429:
@@ -483,7 +485,7 @@ class AccountPool:
         elif status >= 500:
             self.stats["upstream_5xx"] += 1
 
-        self.recent_requests.appendleft({
+        row = {
             "request_id": request_id,
             "account": account.name,
             "email": account.email,
@@ -493,14 +495,22 @@ class AccountPool:
             "retries": retries,
             "strategy": get("rotation_strategy"),
             "at": time.time(),
-        })
+        }
+        if stream_mode:
+            row["stream_mode"] = stream_mode
+        if transport:
+            row["transport"] = transport
+        self.recent_requests.appendleft(row)
         logger.info(
-            "request_id=%s account=%s status=%s duration_ms=%.1f retries=%s path=%s",
+            "request_id=%s account=%s status=%s duration_ms=%.1f retries=%s "
+            "stream_mode=%s transport=%s path=%s",
             request_id or "-",
             account.name,
             status,
             duration_ms,
             retries,
+            stream_mode or "-",
+            transport or "-",
             path,
         )
         self._save_recent_requests()

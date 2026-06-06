@@ -6,5 +6,9 @@
   "quota_refresh_interval": 300,
   "quota_tracker_enabled": true,
   "quota_tracker_user_set": false,
+  "codex_stream_mode": "hybrid",
+  "codex_hybrid_probe_seconds": 8,
+  "codex_hybrid_probe_bytes": 262144,
+  "codex_stream_retry_cooldown": 0,
   "log_level": "INFO"
 }

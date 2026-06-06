@@ -711,12 +711,38 @@ def status() -> dict:
         "enabled": codex.get("enabled"),
         "mode": codex.get("mode"),
         "strategy": cfg.get("rotation_strategy"),
+        "codex_stream_mode": cfg.get("codex_stream_mode"),
+        "codex_hybrid_probe_seconds": cfg.get("codex_hybrid_probe_seconds"),
+        "codex_hybrid_probe_bytes": cfg.get("codex_hybrid_probe_bytes"),
+        "codex_stream_retry_cooldown": cfg.get("codex_stream_retry_cooldown") or cfg.get("rate_limit_cooldown"),
+        "codex_provider_base_url": codex.get("current", {}).get("model_providers.codex-account-pool.base_url"),
+        "codex_provider_supports_websockets": codex.get("current", {}).get("model_providers.codex-account-pool.supports_websockets"),
+        "codex_expected_base_url": codex.get("expected", {}).get("codex_base_url"),
         "running": bool(proxy),
         "active_accounts": proxy.get("active_accounts") if proxy else None,
         "total_accounts": proxy.get("total_accounts") if proxy else None,
         "source_dir": service.get("source_dir"),
         "runtime_dir": service.get("runtime_dir"),
     })
+
+
+def set_codex_stream_mode(mode: str) -> dict:
+    if mode not in {"hybrid", "buffered", "realtime"}:
+        return {
+            "action": "set_codex_stream_mode",
+            "error": "codex_stream_mode must be hybrid, buffered, or realtime",
+            "codex_stream_mode": mode,
+        }
+    cfg = config.load()
+    previous = cfg.get("codex_stream_mode")
+    cfg["codex_stream_mode"] = mode
+    config.save(cfg)
+    return {
+        "action": "set_codex_stream_mode",
+        "codex_stream_mode": mode,
+        "previous_codex_stream_mode": previous,
+        "changed": previous != mode,
+    }
 
 
 def set_rotation_strategy(strategy: str) -> dict:
@@ -764,10 +790,12 @@ def main() -> None:
             "clear-cooldown",
             "clear-auth-error",
             "set-rotation-strategy",
+            "set-codex-stream-mode",
         ),
     )
     parser.add_argument("--name", default="")
     parser.add_argument("--strategy", default="")
+    parser.add_argument("--stream-mode", default="")
     parser.add_argument("--format", choices=("pretty", "json"), default="pretty")
     args = parser.parse_args()
 
@@ -793,6 +821,7 @@ def main() -> None:
         "clear-cooldown": lambda: clear_cooldown(args.name),
         "clear-auth-error": lambda: clear_auth_error(args.name),
         "set-rotation-strategy": lambda: set_rotation_strategy(args.strategy),
+        "set-codex-stream-mode": lambda: set_codex_stream_mode(args.stream_mode),
     }
     print(render_output(actions[args.action](), args.format))
 

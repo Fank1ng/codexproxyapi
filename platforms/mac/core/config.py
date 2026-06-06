@@ -27,6 +27,10 @@ DEFAULTS = {
     "upstream_connect_timeout_sec": 10,
     "upstream_transient_retries": 2,
     "upstream_transient_backoff_ms": 250,
+    "codex_stream_mode": "hybrid",
+    "codex_hybrid_probe_seconds": 8,
+    "codex_hybrid_probe_bytes": 262144,
+    "codex_stream_retry_cooldown": 0,
     "quota_weight_5h": 0.7,
     "quota_weight_7d": 0.3,
     "log_level": "INFO",
@@ -120,6 +124,10 @@ def validate(cfg: dict) -> dict:
         "upstream_connect_timeout_sec": int_range("upstream_connect_timeout_sec", 1, 60),
         "upstream_transient_retries": int_range("upstream_transient_retries", 0, 5),
         "upstream_transient_backoff_ms": int_range("upstream_transient_backoff_ms", 0, 5000),
+        "codex_stream_mode": str(merged.get("codex_stream_mode", DEFAULTS["codex_stream_mode"])).lower(),
+        "codex_hybrid_probe_seconds": int_range("codex_hybrid_probe_seconds", 0, 120),
+        "codex_hybrid_probe_bytes": int_range("codex_hybrid_probe_bytes", 1024, 10485760),
+        "codex_stream_retry_cooldown": int_range("codex_stream_retry_cooldown", 0, 3600),
         "quota_weight_5h": float_range("quota_weight_5h", 0, 1),
         "quota_weight_7d": float_range("quota_weight_7d", 0, 1),
         "log_level": str(merged.get("log_level", DEFAULTS["log_level"])).upper(),
@@ -127,6 +135,9 @@ def validate(cfg: dict) -> dict:
 
     if normalized["rotation_strategy"] not in {"round_robin", "most_available"}:
         errors.append("rotation_strategy must be round_robin or most_available")
+
+    if normalized["codex_stream_mode"] not in {"realtime", "buffered", "hybrid"}:
+        errors.append("codex_stream_mode must be realtime, buffered, or hybrid")
 
     if normalized["log_level"] not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
         errors.append("log_level must be DEBUG, INFO, WARNING, ERROR, or CRITICAL")

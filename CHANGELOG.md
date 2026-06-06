@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.5.2 - 2026-06-07
+
+- Routed Codex `/v1/responses` traffic through the ChatGPT Codex backend while preserving the OpenAI Responses wire API configuration.
+- Added WebSocket-aware proxying, hybrid Codex stream buffering, retry cooldowns, and interruption diagnostics for streamed model responses.
+- Exposed Codex stream mode and transport details in recent request logs and the web dashboard.
+- Updated Codex CLI proxy config generation to enable WebSocket support and retain legacy Codex backend detection.
+- Expanded core tests for routing, streaming, WebSocket relay behavior, cooldown handling, and stream configuration validation.
+
 ## v0.5.1 - 2026-06-01
 
 - Added shared Codex CLI discovery for Windows and macOS control flows.

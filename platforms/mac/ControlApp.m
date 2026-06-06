@@ -432,6 +432,7 @@ static NSString *CPRelativeTime(id epochValue) {
 - (void)renderConfigSection {
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self configCardsRow]]];
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self strategyCard]]];
+    [self.contentStack addArrangedSubview:[self constrainedContentView:[self streamModeCard]]];
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self pathsCard]]];
 }
 
@@ -549,6 +550,29 @@ static NSString *CPRelativeTime(id epochValue) {
         return @"额度优先";
     }
     return CPDisplayString(value);
+}
+
+- (NSString *)streamModeTitleForValue:(NSString *)value {
+    if ([value isEqualToString:@"hybrid"]) {
+        return @"混合";
+    }
+    if ([value isEqualToString:@"buffered"]) {
+        return @"完整缓冲";
+    }
+    if ([value isEqualToString:@"realtime"]) {
+        return @"实时";
+    }
+    return CPDisplayString(value);
+}
+
+- (NSString *)streamModeDetailForValue:(NSString *)value {
+    if ([value isEqualToString:@"realtime"]) {
+        return @"实时转发；已开始输出后无法自动补完断流。";
+    }
+    if ([value isEqualToString:@"buffered"]) {
+        return @"完整读取到 response.completed 后回放。";
+    }
+    return @"先短暂预缓冲，长任务转完整缓冲并可换账号重试。";
 }
 
 - (NSView *)accountAndInspectorRowWithCompact:(BOOL)compact {
@@ -868,6 +892,55 @@ static NSString *CPRelativeTime(id epochValue) {
     return card;
 }
 
+- (NSView *)streamModeCard {
+    NSView *card = [self cardView];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.spacing = 8;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:stack];
+    [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 12, 12)];
+
+    NSStackView *header = [[NSStackView alloc] init];
+    header.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    header.alignment = NSLayoutAttributeCenterY;
+    header.spacing = 10;
+    [header addArrangedSubview:[self labelWithText:@"Codex 流模式" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
+    NSView *flex = [[NSView alloc] init];
+    [header addArrangedSubview:flex];
+
+    NSSegmentedControl *control = [[NSSegmentedControl alloc] init];
+    control.segmentCount = 3;
+    [control setLabel:@"混合" forSegment:0];
+    [control setLabel:@"缓冲" forSegment:1];
+    [control setLabel:@"实时" forSegment:2];
+    control.trackingMode = NSSegmentSwitchTrackingSelectOne;
+    control.target = self;
+    control.action = @selector(streamModeAction:);
+    control.translatesAutoresizingMaskIntoConstraints = NO;
+    control.controlSize = NSControlSizeSmall;
+    [control.widthAnchor constraintEqualToConstant:220].active = YES;
+    NSString *mode = CPString(self.statusSnapshot[@"codex_stream_mode"]);
+    if ([mode isEqualToString:@"buffered"]) {
+        control.selectedSegment = 1;
+    } else if ([mode isEqualToString:@"realtime"]) {
+        control.selectedSegment = 2;
+    } else {
+        mode = @"hybrid";
+        control.selectedSegment = 0;
+    }
+    [header addArrangedSubview:control];
+    [stack addArrangedSubview:header];
+
+    NSString *detail = [NSString stringWithFormat:@"当前模式：%@。%@",
+                        [self streamModeTitleForValue:mode],
+                        [self streamModeDetailForValue:mode]];
+    [stack addArrangedSubview:[self emptyStateLabel:detail]];
+    return card;
+}
+
 - (NSView *)pathsCard {
     NSView *card = [self cardView];
     card.translatesAutoresizingMaskIntoConstraints = NO;
@@ -879,6 +952,8 @@ static NSString *CPRelativeTime(id epochValue) {
     [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 12, 12)];
     [stack addArrangedSubview:[self labelWithText:@"配置与路径" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
     [stack addArrangedSubview:[self infoRowWithTitle:@"Codex CLI" value:CPBool(self.statusSnapshot[@"codex_cli_found"]) ? CPDisplayString(self.statusSnapshot[@"codex_cli"]) : @"未找到"]];
+    [stack addArrangedSubview:[self infoRowWithTitle:@"Provider" value:CPDisplayString(self.statusSnapshot[@"codex_provider_base_url"])]];
+    [stack addArrangedSubview:[self infoRowWithTitle:@"WebSocket" value:CPBool(self.statusSnapshot[@"codex_provider_supports_websockets"]) ? @"开启" : @"未开启"]];
     [stack addArrangedSubview:[self infoRowWithTitle:@"运行目录" value:CPDisplayString(self.statusSnapshot[@"runtime_dir"])]];
     [stack addArrangedSubview:[self infoRowWithTitle:@"源码/资源" value:CPDisplayString(self.statusSnapshot[@"source_dir"])]];
     NSStackView *buttons = [[NSStackView alloc] init];
@@ -999,7 +1074,7 @@ static NSString *CPRelativeTime(id epochValue) {
     [table addSubview:rows];
     [self pinView:rows toView:table insets:NSEdgeInsetsMake(0, 0, 0, 0)];
 
-    NSView *head = [self recentRequestRowWithTime:@"时间" account:@"账号" status:@"状态" path:@"路径" header:YES];
+    NSView *head = [self recentRequestRowWithTime:@"时间" account:@"账号" status:@"状态" transport:@"传输" path:@"路径" header:YES];
     [rows addArrangedSubview:head];
     [head.widthAnchor constraintEqualToAnchor:rows.widthAnchor].active = YES;
     NSArray *items = CPArray(self.statusSnapshot[@"recent_requests"]);
@@ -1009,6 +1084,7 @@ static NSString *CPRelativeTime(id epochValue) {
         NSView *row = [self recentRequestRowWithTime:[self requestTimeText:item[@"at"]]
                                              account:CPDisplayString(item[@"account"])
                                               status:CPDisplayString(item[@"status"])
+                                           transport:CPDisplayString(item[@"transport"])
                                                 path:CPDisplayString(item[@"path"])
                                               header:NO];
         [rows addArrangedSubview:row];
@@ -1022,23 +1098,27 @@ static NSString *CPRelativeTime(id epochValue) {
     return card;
 }
 
-- (NSView *)recentRequestRowWithTime:(NSString *)time account:(NSString *)account status:(NSString *)status path:(NSString *)path header:(BOOL)header {
+- (NSView *)recentRequestRowWithTime:(NSString *)time account:(NSString *)account status:(NSString *)status transport:(NSString *)transport path:(NSString *)path header:(BOOL)header {
     NSView *row = [[NSView alloc] init];
     row.translatesAutoresizingMaskIntoConstraints = NO;
     [row.heightAnchor constraintEqualToConstant:header ? 24 : 25].active = YES;
 
     NSTextField *timeLabel = [self labelWithText:time font:[NSFont monospacedSystemFontOfSize:10 weight:header ? NSFontWeightSemibold : NSFontWeightRegular] color:header ? NSColor.secondaryLabelColor : NSColor.labelColor];
     NSTextField *accountLabel = [self labelWithText:account font:[NSFont monospacedSystemFontOfSize:10 weight:header ? NSFontWeightSemibold : NSFontWeightRegular] color:header ? NSColor.secondaryLabelColor : NSColor.labelColor];
-    NSTextField *statusLabel = [self labelWithText:status font:[NSFont monospacedSystemFontOfSize:10 weight:header ? NSFontWeightSemibold : NSFontWeightRegular] color:[status hasPrefix:@"2"] ? NSColor.systemGreenColor : (header ? NSColor.secondaryLabelColor : NSColor.systemOrangeColor)];
+    BOOL statusOK = [status hasPrefix:@"1"] || [status hasPrefix:@"2"];
+    NSTextField *statusLabel = [self labelWithText:status font:[NSFont monospacedSystemFontOfSize:10 weight:header ? NSFontWeightSemibold : NSFontWeightRegular] color:statusOK ? NSColor.systemGreenColor : (header ? NSColor.secondaryLabelColor : NSColor.systemOrangeColor)];
+    NSTextField *transportLabel = [self labelWithText:transport font:[NSFont monospacedSystemFontOfSize:9 weight:header ? NSFontWeightSemibold : NSFontWeightRegular] color:header ? NSColor.secondaryLabelColor : NSColor.labelColor];
     NSTextField *pathLabel = [self labelWithText:path font:[NSFont monospacedSystemFontOfSize:9 weight:NSFontWeightRegular] color:header ? NSColor.secondaryLabelColor : NSColor.secondaryLabelColor];
     timeLabel.alignment = NSTextAlignmentLeft;
     accountLabel.alignment = NSTextAlignmentLeft;
     statusLabel.alignment = NSTextAlignmentCenter;
+    transportLabel.alignment = NSTextAlignmentLeft;
     pathLabel.alignment = NSTextAlignmentLeft;
     pathLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
     [row addSubview:timeLabel];
     [row addSubview:accountLabel];
     [row addSubview:statusLabel];
+    [row addSubview:transportLabel];
     [row addSubview:pathLabel];
     [NSLayoutConstraint activateConstraints:@[
         [timeLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:8],
@@ -1053,7 +1133,11 @@ static NSString *CPRelativeTime(id epochValue) {
         [statusLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
         [statusLabel.widthAnchor constraintEqualToConstant:30],
 
-        [pathLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:148],
+        [transportLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:146],
+        [transportLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [transportLabel.widthAnchor constraintEqualToConstant:72],
+
+        [pathLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:224],
         [pathLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-8],
         [pathLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
     ]];
@@ -1551,6 +1635,18 @@ static NSString *CPRelativeTime(id epochValue) {
     NSString *strategy = sender.selectedSegment == 1 ? @"most_available" : @"round_robin";
     [self performAction:@[@"set-rotation-strategy", @"--strategy", strategy]
                   label:[NSString stringWithFormat:@"切换选择策略为 %@", [self strategyTitleForValue:strategy]]
+           refreshAfter:YES];
+}
+
+- (void)streamModeAction:(NSSegmentedControl *)sender {
+    NSString *mode = @"hybrid";
+    if (sender.selectedSegment == 1) {
+        mode = @"buffered";
+    } else if (sender.selectedSegment == 2) {
+        mode = @"realtime";
+    }
+    [self performAction:@[@"set-codex-stream-mode", @"--stream-mode", mode]
+                  label:[NSString stringWithFormat:@"切换 Codex 流模式为 %@", [self streamModeTitleForValue:mode]]
            refreshAfter:YES];
 }
 

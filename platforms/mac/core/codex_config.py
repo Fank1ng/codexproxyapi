@@ -22,7 +22,8 @@ def proxy_urls() -> dict:
     return {
         "openai_base_url": f"http://127.0.0.1:{port}/v1",
         "chatgpt_base_url": f"http://127.0.0.1:{port}/backend-api/",
-        "codex_base_url": f"http://127.0.0.1:{port}/backend-api/codex",
+        "codex_base_url": f"http://127.0.0.1:{port}/v1",
+        "legacy_codex_base_url": f"http://127.0.0.1:{port}/backend-api/codex",
     }
 
 
@@ -36,6 +37,12 @@ def status(path: Optional[Path] = None) -> dict:
         provider == PROVIDER_ID
         and values.get(f"{OPENAI_SECTION}.{OPENAI_KEY}") == urls["codex_base_url"]
         and values.get(f"{OPENAI_SECTION}.wire_api") == "responses"
+        and values.get(f"{OPENAI_SECTION}.supports_websockets") is True
+    )
+    legacy_codex_pool_enabled = (
+        provider == PROVIDER_ID
+        and values.get(f"{OPENAI_SECTION}.{OPENAI_KEY}") == urls["legacy_codex_base_url"]
+        and values.get(f"{OPENAI_SECTION}.wire_api") == "responses"
     )
     legacy_provider_enabled = provider in LEGACY_PROVIDER_IDS or (
         values.get(f"model_providers.openai-proxy.{OPENAI_KEY}") == urls["openai_base_url"]
@@ -46,11 +53,16 @@ def status(path: Optional[Path] = None) -> dict:
         "exists": config_path.exists(),
         "enabled": enabled,
         "mode": (
-            "codex_pool_provider"
-            if enabled
-            else ("partial_chatgpt_backend" if chatgpt_backend_enabled else ("legacy_openai_provider" if legacy_provider_enabled else "direct"))
+                "codex_pool_provider"
+                if enabled
+                else (
+                    "legacy_codex_pool_provider"
+                    if chatgpt_backend_enabled and legacy_codex_pool_enabled
+                    else ("partial_chatgpt_backend" if chatgpt_backend_enabled else ("legacy_openai_provider" if legacy_provider_enabled else "direct"))
+                )
         ),
         "provider_mode_enabled": codex_pool_enabled,
+        "legacy_provider_mode_enabled": legacy_codex_pool_enabled,
         "chatgpt_backend_enabled": chatgpt_backend_enabled,
         "expected": urls,
         "current": {
@@ -58,6 +70,7 @@ def status(path: Optional[Path] = None) -> dict:
             f"{OPENAI_SECTION}.{OPENAI_KEY}": values.get(f"{OPENAI_SECTION}.{OPENAI_KEY}"),
             f"{OPENAI_SECTION}.wire_api": values.get(f"{OPENAI_SECTION}.wire_api"),
             f"{OPENAI_SECTION}.requires_openai_auth": values.get(f"{OPENAI_SECTION}.requires_openai_auth"),
+            f"{OPENAI_SECTION}.supports_websockets": values.get(f"{OPENAI_SECTION}.supports_websockets"),
             LEGACY_OPENAI_KEY: values.get(LEGACY_OPENAI_KEY),
             CHATGPT_KEY: values.get(CHATGPT_KEY),
         },
@@ -67,13 +80,18 @@ def status(path: Optional[Path] = None) -> dict:
 def set_enabled(enabled: bool, path: Optional[Path] = None) -> dict:
     config_path = path or CODEX_CONFIG_PATH
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    original = config_path.read_text() if config_path.exists() else ""
+    original = ""
+    if config_path.exists():
+        try:
+            original = config_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            original = config_path.read_text(encoding="utf-8-sig")
     backup_path = None
     if config_path.exists():
         backup_path = config_path.with_suffix(
             f"{config_path.suffix}.{int(time.time())}.bak"
         )
-        backup_path.write_text(original)
+        backup_path.write_text(original, encoding="utf-8")
 
     lines = original.splitlines()
     urls = proxy_urls()
@@ -87,7 +105,7 @@ def set_enabled(enabled: bool, path: Optional[Path] = None) -> dict:
         lines = _set_section_key(lines, OPENAI_SECTION, OPENAI_KEY, urls["codex_base_url"])
         lines = _set_section_key(lines, OPENAI_SECTION, "wire_api", "responses")
         lines = _set_section_key(lines, OPENAI_SECTION, "requires_openai_auth", True)
-        lines = _set_section_key(lines, OPENAI_SECTION, "supports_websockets", False)
+        lines = _set_section_key(lines, OPENAI_SECTION, "supports_websockets", True)
     else:
         lines = _set_key(lines, LEGACY_OPENAI_KEY, None, comment_out=True)
         lines = _set_key(lines, MODEL_PROVIDER_KEY, None, comment_out=True, root_only=True)
@@ -99,7 +117,7 @@ def set_enabled(enabled: bool, path: Optional[Path] = None) -> dict:
 
     text = "\n".join(lines).rstrip() + "\n"
     tmp_path = config_path.with_suffix(f"{config_path.suffix}.tmp")
-    tmp_path.write_text(text)
+    tmp_path.write_text(text, encoding="utf-8")
     tmp_path.replace(config_path)
     result = status(config_path)
     result["backup_path"] = str(backup_path) if backup_path else None
@@ -125,7 +143,11 @@ def _read_values(path: Path) -> dict:
     section = ""
     section_pattern = re.compile(r'^\s*\[(.+?)\]\s*$')
     pattern = re.compile(r'^\s*([A-Za-z0-9_]+)\s*=\s*(.+?)\s*$')
-    for line in path.read_text().splitlines():
+    try:
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        content = path.read_text(encoding="utf-8-sig")
+    for line in content.splitlines():
         section_match = section_pattern.match(line)
         if section_match:
             section = section_match.group(1).strip()
