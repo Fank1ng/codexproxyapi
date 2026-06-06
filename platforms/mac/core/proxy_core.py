@@ -19,6 +19,7 @@ UPSTREAM_MAP = {
     "/v1/": "https://api.openai.com",
     "/backend-api/": "https://chatgpt.com",
 }
+CODEX_RESPONSES_PATH = "/backend-api/codex/responses"
 
 HOP_HEADERS = {
     "host", "transfer-encoding", "content-length", "connection",
@@ -78,6 +79,10 @@ def _is_openai_inference_path(path: str) -> bool:
         or path == "/v1/chat/completions"
         or path == "/v1/completions"
     )
+
+
+def _is_codex_responses_path(path: str) -> bool:
+    return path == CODEX_RESPONSES_PATH or path.startswith(f"{CODEX_RESPONSES_PATH}/")
 
 
 def _models_response(request_id: str, path: str) -> web.Response:
@@ -162,6 +167,12 @@ def _is_streaming_response(upstream_resp: aiohttp.ClientResponse) -> bool:
     return "text/event-stream" in content_type
 
 
+def _should_stream_response(path: str, upstream_resp: aiohttp.ClientResponse) -> bool:
+    if _is_codex_responses_path(path) and 200 <= upstream_resp.status < 300:
+        return True
+    return _is_streaming_response(upstream_resp)
+
+
 def _response_headers(upstream_resp: aiohttp.ClientResponse, request_id: str) -> dict:
     headers = {
         k: v for k, v in upstream_resp.headers.items()
@@ -169,6 +180,45 @@ def _response_headers(upstream_resp: aiohttp.ClientResponse, request_id: str) ->
     }
     headers["x-request-id"] = request_id
     return headers
+
+
+def _record_attempt(attempts: list[dict], account, reason: str, **details) -> None:
+    item = {
+        "account": account.name,
+        "reason": reason,
+    }
+    item.update({k: v for k, v in details.items() if v is not None})
+    attempts.append(item)
+
+
+def _last_attempt_error(attempts: list[dict]) -> str:
+    if not attempts:
+        return ""
+    last = attempts[-1]
+    if last.get("error"):
+        return str(last["error"])
+    if last.get("status"):
+        return f"{last.get('reason', 'upstream_status')}:{last['status']}"
+    return str(last.get("reason", ""))
+
+
+def _upstream_failure_response(
+    request_id: str,
+    path: str,
+    attempts: list[dict],
+    message: str = "all eligible accounts failed for this request",
+) -> web.Response:
+    return web.json_response(
+        {
+            "error": message,
+            "request_id": request_id,
+            "path": path,
+            "attempted_accounts": attempts,
+            "last_error": _last_attempt_error(attempts),
+        },
+        status=502,
+        headers={"x-request-id": request_id},
+    )
 
 
 async def handle(
@@ -249,17 +299,13 @@ async def _handle_with_session(
     max_retries = get("max_retries")
     transient_retries = int(get("upstream_transient_retries") or 0)
     tried_accounts: set[str] = set()
+    attempts: list[dict] = []
 
     for retry_idx in range(max_retries):
         account = pool.pick(exclude=tried_accounts)
         if account is None:
             if tried_accounts:
-                return web.Response(
-                    status=502,
-                    text='{"error": "all eligible accounts failed for this request"}',
-                    content_type="application/json",
-                    headers={"x-request-id": request_id},
-                )
+                return _upstream_failure_response(request_id, path, attempts)
             return web.Response(
                 status=429,
                 text='{"error": "all accounts rate-limited"}',
@@ -295,6 +341,14 @@ async def _handle_with_session(
                                     request_id,
                                 )
                                 retry_after = _retry_after_seconds(upstream_resp.headers.get("Retry-After"))
+                                _record_attempt(
+                                    attempts,
+                                    account,
+                                    "rate_limit_429",
+                                    status=upstream_resp.status,
+                                    retry_after=retry_after,
+                                    retry_index=retry_idx,
+                                )
                                 pool.mark_rate_limited(account, retry_after or cooldown, "rate_limit_429")
                                 await asyncio.sleep(random.uniform(0.01, 0.05))
                                 break
@@ -303,17 +357,31 @@ async def _handle_with_session(
                                 logger.info(f"Account {account.name}: got 401, refreshing")
                                 pool.stats["auth_refreshes"] += 1
                                 if auth_attempt > 0:
+                                    _record_attempt(
+                                        attempts,
+                                        account,
+                                        "auth_failed",
+                                        status=upstream_resp.status,
+                                        retry_index=retry_idx,
+                                    )
                                     pool.mark_rate_limited(account, 300, "auth_failed")
                                     break
                                 ok = await account.refresh()
                                 if not ok:
+                                    _record_attempt(
+                                        attempts,
+                                        account,
+                                        "auth_failed",
+                                        status=upstream_resp.status,
+                                        retry_index=retry_idx,
+                                    )
                                     pool.mark_rate_limited(account, 300, "auth_failed")
                                 else:
                                     headers["Authorization"] = f"Bearer {account.access_token}"
                                     retry_after_refresh = True
                                 break
 
-                            if not _is_streaming_response(upstream_resp):
+                            if not _should_stream_response(path, upstream_resp):
                                 payload = await upstream_resp.read()
                                 duration_ms = (time.monotonic() - started) * 1000
                                 pool.record_request(
@@ -343,7 +411,7 @@ async def _handle_with_session(
                                 await resp.write_eof()
                             except (ConnectionResetError, aiohttp.ClientError, asyncio.TimeoutError) as e:
                                 logger.info(f"stream ended early request_id={request_id}: {e}")
-                                pool.record_error(path, str(e), account, request_id, retry_idx)
+                                pool.record_error(path, f"stream_interrupted: {e}", account, request_id, retry_idx)
                                 pool.record_request(
                                     account,
                                     path,
@@ -388,12 +456,14 @@ async def _handle_with_session(
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"upstream error: {e}")
+            _record_attempt(
+                attempts,
+                account,
+                "upstream_error",
+                error=str(e),
+                retry_index=retry_idx,
+            )
             pool.record_error(path, str(e), account, request_id, retry_idx)
             continue
 
-    return web.Response(
-        status=502,
-        text='{"error": "upstream unavailable"}',
-        content_type="application/json",
-        headers={"x-request-id": request_id},
-    )
+    return _upstream_failure_response(request_id, path, attempts, "upstream unavailable")

@@ -29,12 +29,12 @@ import codex_config
 from config import CONFIG_DIR, ConfigError, load, save, get
 from login_manager import LoginManager, find_codex_cli
 from proxy_core import handle as proxy_handle
-from quota_tracker import refresh_once as refresh_quota_once, run as quota_run
+from quota_tracker import refresh_once as refresh_quota_once, run as quota_run, status as quota_status
 import service_manager
 
 CODE_CLI = find_codex_cli() or "/Applications/Codex.app/Contents/Resources/codex"
 CODEX_AUTH_PATH = codex_config.CODEX_CONFIG_PATH.parent / "auth.json"
-APP_VERSION = "0.5.1"
+APP_VERSION = "0.5.2"
 
 # ── Setup ──────────────────────────────────────────────────────────────
 
@@ -407,6 +407,7 @@ async def api_status(request: web.Request) -> web.Response:
         "last_request": pool.recent_requests[0] if pool.recent_requests else None,
         "recent_requests": recent_requests,
         "recent_errors": list(pool.recent_errors),
+        "quota_tracker": quota_status(request.app.get("quota_task")),
         "model_proxy": {
             "observed": bool(recent_potential_quota_requests),
             "coverage": "potential_quota_path_observed" if recent_potential_quota_requests else "not_confirmed",
@@ -470,12 +471,16 @@ async def api_config_put(request: web.Request) -> web.Response:
         body = await request.json()
         current = load()
         old_port = current.get("port")
+        if "quota_tracker_enabled" in body:
+            body["quota_tracker_user_set"] = True
         current.update(body)
         save(current)
         updated = load()
         logging.getLogger().setLevel(getattr(logging, str(updated.get("log_level")).upper(), logging.INFO))
+        await _sync_quota_task(request.app)
         updated["hot_applied"] = True
         updated["restart_required"] = old_port != updated.get("port")
+        updated["quota_tracker"] = quota_status(request.app.get("quota_task"))
         return web.json_response(updated)
     except (ConfigError, json.JSONDecodeError) as e:
         return web.json_response({"error": str(e) or "invalid request"}, status=400)
@@ -619,8 +624,23 @@ def create_app() -> web.Application:
 async def on_startup(app: web.Application) -> None:
     app["upstream_session"] = aiohttp.ClientSession(auto_decompress=False)
     app["quota_task"] = None
+    await _sync_quota_task(app)
+
+
+async def _sync_quota_task(app: web.Application) -> None:
+    task = app.get("quota_task")
+    running = bool(task and not task.done())
     if get("quota_tracker_enabled"):
-        app["quota_task"] = asyncio.create_task(quota_run(pool))
+        if not running:
+            app["quota_task"] = asyncio.create_task(quota_run(pool))
+        return
+    if running:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    app["quota_task"] = None
 
 
 async def on_cleanup(app: web.Application) -> None:

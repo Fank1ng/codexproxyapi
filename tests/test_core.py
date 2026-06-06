@@ -25,9 +25,11 @@ from proxy_core import (
     _account_headers,
     _clean_headers,
     _is_streaming_response,
+    _should_stream_response,
     _is_models_path,
     _is_openai_inference_path,
     _retry_after_seconds,
+    _upstream_failure_response,
     _upstream_timeout,
 )
 
@@ -445,6 +447,57 @@ class ProxyStatusTests(unittest.TestCase):
         self.assertTrue(data["refreshed"])
         self.assertEqual(data["accounts"]["a"]["fetched_at"], 123)
         refresh.assert_called_once_with(proxy.pool)
+
+
+class ProxyCoreTests(unittest.TestCase):
+    def test_codex_responses_2xx_streams_even_with_json_content_type(self):
+        response = mock.Mock()
+        response.status = 200
+        response.headers = {"Content-Type": "application/json"}
+
+        self.assertTrue(_should_stream_response("/backend-api/codex/responses", response))
+
+    def test_non_codex_json_response_does_not_force_streaming(self):
+        response = mock.Mock()
+        response.status = 200
+        response.headers = {"Content-Type": "application/json"}
+
+        self.assertFalse(_should_stream_response("/backend-api/wham/apps", response))
+
+    def test_sse_response_still_streams_on_background_paths(self):
+        response = mock.Mock()
+        response.status = 200
+        response.headers = {"Content-Type": "text/event-stream; charset=utf-8"}
+
+        self.assertTrue(_should_stream_response("/backend-api/wham/apps", response))
+
+    def test_upstream_failure_response_includes_attempt_diagnostics(self):
+        response = _upstream_failure_response(
+            "rid123",
+            "/backend-api/codex/responses",
+            [
+                {
+                    "account": "a",
+                    "reason": "upstream_error",
+                    "error": "Connection timeout",
+                    "retry_index": 0,
+                },
+                {
+                    "account": "b",
+                    "reason": "rate_limit_429",
+                    "status": 429,
+                    "retry_index": 1,
+                },
+            ],
+        )
+        data = json.loads(response.text)
+
+        self.assertEqual(response.status, 502)
+        self.assertEqual(data["request_id"], "rid123")
+        self.assertEqual(data["path"], "/backend-api/codex/responses")
+        self.assertEqual(data["attempted_accounts"][0]["account"], "a")
+        self.assertEqual(data["attempted_accounts"][1]["reason"], "rate_limit_429")
+        self.assertEqual(data["last_error"], "rate_limit_429:429")
 
 
 class QuotaTrackerTests(unittest.TestCase):

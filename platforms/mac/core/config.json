@@ -4,5 +4,7 @@
   "rotation_strategy": "round_robin",
   "max_retries": 10,
   "quota_refresh_interval": 300,
+  "quota_tracker_enabled": true,
+  "quota_tracker_user_set": false,
   "log_level": "INFO"
 }

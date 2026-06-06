@@ -100,9 +100,61 @@ static NSString *CPRelativeTime(id epochValue) {
 @interface CPFlippedStackView : NSStackView
 @end
 
+@interface CPThemedView : NSView
+@property(nonatomic, strong) NSColor *cpBackgroundColor;
+@property(nonatomic, strong) NSColor *cpBorderColor;
+@property(nonatomic, strong) NSColor *cpShadowColor;
+@end
+
 @implementation CPFlippedStackView
 - (BOOL)isFlipped {
     return YES;
+}
+@end
+
+@implementation CPThemedView
+- (void)setCpBackgroundColor:(NSColor *)cpBackgroundColor {
+    _cpBackgroundColor = cpBackgroundColor;
+    [self cpApplyThemeColors];
+}
+
+- (void)setCpBorderColor:(NSColor *)cpBorderColor {
+    _cpBorderColor = cpBorderColor;
+    [self cpApplyThemeColors];
+}
+
+- (void)setCpShadowColor:(NSColor *)cpShadowColor {
+    _cpShadowColor = cpShadowColor;
+    [self cpApplyThemeColors];
+}
+
+- (CGColorRef)cpCGColorForColor:(NSColor *)color {
+    if (!color) {
+        return nil;
+    }
+    __block CGColorRef cgColor = nil;
+    NSAppearance *appearance = self.effectiveAppearance ?: NSApp.effectiveAppearance;
+    [appearance performAsCurrentDrawingAppearance:^{
+        NSColor *rgb = [color colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace] ?: color;
+        if (rgb.CGColor) {
+            cgColor = CGColorRetain(rgb.CGColor);
+        }
+    }];
+    return cgColor ? (CGColorRef)CFAutorelease(cgColor) : nil;
+}
+
+- (void)cpApplyThemeColors {
+    if (!self.layer) {
+        self.wantsLayer = YES;
+    }
+    self.layer.backgroundColor = [self cpCGColorForColor:self.cpBackgroundColor];
+    self.layer.borderColor = [self cpCGColorForColor:self.cpBorderColor];
+    self.layer.shadowColor = [self cpCGColorForColor:self.cpShadowColor ?: NSColor.blackColor];
+}
+
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    [self cpApplyThemeColors];
 }
 @end
 
@@ -146,15 +198,15 @@ static NSString *CPRelativeTime(id epochValue) {
     self.window.movableByWindowBackground = NO;
     [self.window center];
 
-    NSView *root = [[NSView alloc] initWithFrame:frame];
+    CPThemedView *root = [[CPThemedView alloc] initWithFrame:frame];
     root.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     root.wantsLayer = YES;
-    root.layer.backgroundColor = NSColor.windowBackgroundColor.CGColor;
+    root.cpBackgroundColor = NSColor.windowBackgroundColor;
     self.window.contentView = root;
 
-    NSView *sidebar = [[NSView alloc] init];
+    CPThemedView *sidebar = [[CPThemedView alloc] init];
     sidebar.wantsLayer = YES;
-    sidebar.layer.backgroundColor = NSColor.controlBackgroundColor.CGColor;
+    sidebar.cpBackgroundColor = NSColor.controlBackgroundColor;
     sidebar.translatesAutoresizingMaskIntoConstraints = NO;
     [root addSubview:sidebar];
     [self buildSidebarInView:sidebar];
@@ -177,6 +229,10 @@ static NSString *CPRelativeTime(id epochValue) {
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
     [self appendLog:@"控制台已启动。原生 App 会优先读取本地代理 API，代理离线时回退到本地账号扫描。"];
+    [NSDistributedNotificationCenter.defaultCenter addObserver:self
+                                                      selector:@selector(systemAppearanceChanged:)
+                                                          name:@"AppleInterfaceThemeChangedNotification"
+                                                        object:nil];
     [self startRuntimeInitialization];
     self.refreshTimer = [NSTimer scheduledTimerWithTimeInterval:15
                                                          target:self
@@ -203,8 +259,16 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (void)windowWillClose:(NSNotification *)notification {
+    [NSDistributedNotificationCenter.defaultCenter removeObserver:self];
     [self.refreshTimer invalidate];
     self.refreshTimer = nil;
+}
+
+- (void)systemAppearanceChanged:(NSNotification *)notification {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self updateNavigationSelection];
+        [self renderActiveSection];
+    });
 }
 
 #pragma mark - Layout
@@ -632,6 +696,7 @@ static NSString *CPRelativeTime(id epochValue) {
     [header addArrangedSubview:flex];
     [header addArrangedSubview:[self smallButtonWithTitle:@"刷新额度" symbol:@"arrow.clockwise.circle" selector:@selector(refreshQuotaAction:)]];
     [stack addArrangedSubview:header];
+    [stack addArrangedSubview:[self emptyStateLabel:[self quotaTrackerSummaryText]]];
 
     for (NSDictionary *account in self.accounts) {
         NSString *name = CPString(account[@"name"]);
@@ -652,6 +717,39 @@ static NSString *CPRelativeTime(id epochValue) {
         [stack addArrangedSubview:[self emptyStateLabel:@"没有发现账号。请先添加账号或扫描账号目录。"]];
     }
     return card;
+}
+
+- (NSString *)quotaTrackerSummaryText {
+    NSDictionary *tracker = CPDict(self.statusSnapshot[@"quota_tracker"]);
+    if (!tracker.count) {
+        return @"自动刷新：等待代理状态。";
+    }
+    BOOL enabled = CPBool(tracker[@"enabled"]);
+    BOOL running = CPBool(tracker[@"running"]);
+    BOOL inProgress = CPBool(tracker[@"in_progress"]);
+    NSInteger interval = MAX(0, (NSInteger)CPDouble(tracker[@"interval"]));
+    NSString *intervalText = interval >= 60
+        ? [NSString stringWithFormat:@"%ld 分钟", (long)MAX(1, interval / 60)]
+        : [NSString stringWithFormat:@"%ld 秒", (long)interval];
+    NSDictionary *last = CPDict(tracker[@"last_result"]);
+    NSString *lastText = CPDouble(tracker[@"last_run_at"]) > 0
+        ? CPRelativeTime(tracker[@"last_run_at"])
+        : @"尚未刷新";
+    NSString *resultText = last.count
+        ? [NSString stringWithFormat:@"成功 %@ / 失败 %@ / 跳过 %@",
+           CPDisplayString(last[@"refreshed"]),
+           CPDisplayString(last[@"failed"]),
+           CPDisplayString(last[@"skipped"])]
+        : CPDisplayString(tracker[@"last_error"]);
+    NSString *state = enabled ? (running ? @"开启" : @"开启，等待任务启动") : @"关闭";
+    if (inProgress) {
+        state = @"刷新中";
+    }
+    return [NSString stringWithFormat:@"自动刷新：%@ · 间隔 %@ · 最近 %@ · %@",
+            state,
+            intervalText,
+            lastText,
+            resultText.length ? resultText : @"暂无结果"];
 }
 
 - (NSString *)codexModeTitle {
@@ -821,7 +919,6 @@ static NSString *CPRelativeTime(id epochValue) {
 - (NSView *)logCardWithHeight:(CGFloat)height actions:(BOOL)actions {
     NSView *card = [self cardViewWithBackground:NSColor.textBackgroundColor];
     card.wantsLayer = YES;
-    card.layer.backgroundColor = NSColor.textBackgroundColor.CGColor;
     card.translatesAutoresizingMaskIntoConstraints = NO;
     [card.heightAnchor constraintEqualToConstant:height].active = YES;
 
@@ -863,7 +960,6 @@ static NSString *CPRelativeTime(id epochValue) {
 - (NSView *)recentRequestsCard {
     NSView *card = [self cardViewWithBackground:NSColor.textBackgroundColor];
     card.wantsLayer = YES;
-    card.layer.backgroundColor = NSColor.textBackgroundColor.CGColor;
     card.translatesAutoresizingMaskIntoConstraints = NO;
     [card.heightAnchor constraintEqualToConstant:320].active = YES;
 
@@ -887,9 +983,9 @@ static NSString *CPRelativeTime(id epochValue) {
     [header addArrangedSubview:[self smallButtonWithTitle:@"路径" symbol:@"folder.badge.gearshape" selector:@selector(showPathsAction:)]];
     [stack addArrangedSubview:header];
 
-    NSView *table = [[NSView alloc] init];
+    CPThemedView *table = [[CPThemedView alloc] init];
     table.wantsLayer = YES;
-    table.layer.backgroundColor = NSColor.controlBackgroundColor.CGColor;
+    table.cpBackgroundColor = NSColor.controlBackgroundColor;
     table.translatesAutoresizingMaskIntoConstraints = NO;
     [table.heightAnchor constraintGreaterThanOrEqualToConstant:248].active = YES;
     [stack addArrangedSubview:table];
@@ -1007,13 +1103,13 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (NSView *)cardViewWithBackground:(NSColor *)background {
-    NSView *view = [[NSView alloc] init];
+    CPThemedView *view = [[CPThemedView alloc] init];
     view.wantsLayer = YES;
     view.layer.cornerRadius = 8;
-    view.layer.backgroundColor = background.CGColor;
-    view.layer.borderColor = NSColor.separatorColor.CGColor;
+    view.cpBackgroundColor = background;
+    view.cpBorderColor = NSColor.separatorColor;
     view.layer.borderWidth = 0.5;
-    view.layer.shadowColor = NSColor.blackColor.CGColor;
+    view.cpShadowColor = NSColor.blackColor;
     view.layer.shadowOpacity = 0.04;
     view.layer.shadowOffset = CGSizeMake(0, -1);
     view.layer.shadowRadius = 4;
@@ -1021,11 +1117,11 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (NSView *)statusDotWithColor:(NSColor *)color {
-    NSView *dot = [[NSView alloc] init];
+    CPThemedView *dot = [[CPThemedView alloc] init];
     dot.translatesAutoresizingMaskIntoConstraints = NO;
     dot.wantsLayer = YES;
     dot.layer.cornerRadius = 4;
-    dot.layer.backgroundColor = color.CGColor;
+    dot.cpBackgroundColor = color;
     [dot.widthAnchor constraintEqualToConstant:8].active = YES;
     [dot.heightAnchor constraintEqualToConstant:8].active = YES;
     return dot;
@@ -1691,10 +1787,7 @@ static NSString *CPRelativeTime(id epochValue) {
         if ([item isEqualToString:@"config.json"] && dstExists) {
             continue;
         }
-        if (dstExists && !force) {
-            continue;
-        }
-        if (dstExists && force && ![fm removeItemAtPath:dst error:error]) {
+        if (dstExists && ![fm removeItemAtPath:dst error:error]) {
             return NO;
         }
         if (![fm copyItemAtPath:src toPath:dst error:error]) {

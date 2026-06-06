@@ -15,6 +15,14 @@ from proxy_core import _account_headers
 USAGE_URL = "https://chatgpt.com/backend-api/codex/usage"
 
 logger = logging.getLogger(__name__)
+_refresh_lock: Optional[asyncio.Lock] = None
+_state = {
+    "in_progress": False,
+    "last_run_at": None,
+    "last_elapsed_ms": None,
+    "last_result": None,
+    "last_error": None,
+}
 
 
 class UsageFetchError(Exception):
@@ -55,12 +63,43 @@ async def _fetch_usage(account, session: aiohttp.ClientSession) -> Optional[dict
         return None
 
 
-async def _run_once(pool: AccountPool) -> None:
-    await refresh_once(pool)
+def _summary(result: dict) -> dict:
+    refreshed = sum(1 for item in result.values() if item.get("refreshed"))
+    skipped = sum(1 for item in result.values() if item.get("skipped"))
+    failed = max(0, len(result) - refreshed - skipped)
+    return {
+        "accounts": len(result),
+        "refreshed": refreshed,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
+def status(task: Optional[asyncio.Task] = None) -> dict:
+    """Return quota tracker runtime status for diagnostics."""
+    running = bool(task and not task.done())
+    task_error = None
+    if task and task.done() and not task.cancelled():
+        exc = task.exception()
+        task_error = str(exc) if exc else None
+    return {
+        "enabled": bool(get("quota_tracker_enabled")),
+        "interval": get("quota_refresh_interval"),
+        "running": running,
+        "in_progress": bool(_state["in_progress"]),
+        "last_run_at": _state["last_run_at"],
+        "last_elapsed_ms": _state["last_elapsed_ms"],
+        "last_result": _state["last_result"],
+        "last_error": task_error or _state["last_error"],
+    }
 
 
 async def refresh_once(pool: AccountPool) -> dict:
     """Fetch and persist quota data for all enabled accounts once."""
+    global _refresh_lock
+    if _refresh_lock is None:
+        _refresh_lock = asyncio.Lock()
+
     async def refresh_account(acct, session):
         if not acct.enabled:
             return acct.name, {"refreshed": False, "skipped": "disabled"}
@@ -80,7 +119,7 @@ async def refresh_once(pool: AccountPool) -> dict:
             data["_fetched_at"] = time.time()
             quota_file.parent.mkdir(parents=True, exist_ok=True)
             tmp_file = quota_file.with_suffix(".json.tmp")
-            with open(tmp_file, "w") as f:
+            with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
                 f.write("\n")
             tmp_file.replace(quota_file)
@@ -88,18 +127,39 @@ async def refresh_once(pool: AccountPool) -> dict:
             return acct.name, {"refreshed": True, "fetched_at": data["_fetched_at"]}
         return acct.name, {"refreshed": False, "error": "usage_unavailable"}
 
-    async with aiohttp.ClientSession() as session:
-        pairs = await asyncio.gather(
-            *(refresh_account(acct, session) for acct in pool.accounts)
-        )
-    return {name: item for name, item in pairs}
+    async with _refresh_lock:
+        started = time.monotonic()
+        _state["in_progress"] = True
+        _state["last_error"] = None
+        try:
+            async with aiohttp.ClientSession() as session:
+                pairs = await asyncio.gather(
+                    *(refresh_account(acct, session) for acct in pool.accounts)
+                )
+            result = {name: item for name, item in pairs}
+            _state["last_run_at"] = time.time()
+            _state["last_elapsed_ms"] = round((time.monotonic() - started) * 1000, 1)
+            _state["last_result"] = _summary(result)
+            return result
+        except Exception as e:
+            _state["last_run_at"] = time.time()
+            _state["last_elapsed_ms"] = round((time.monotonic() - started) * 1000, 1)
+            _state["last_result"] = None
+            _state["last_error"] = str(e)
+            raise
+        finally:
+            _state["in_progress"] = False
 
 
 async def run(pool: AccountPool) -> None:
     """Run the quota tracker loop. Meant to be launched as a background task."""
     while True:
         try:
-            await _run_once(pool)
+            await refresh_once(pool)
         except Exception as e:
             logger.error(f"quota tracker error: {e}")
-        await asyncio.sleep(get("quota_refresh_interval"))
+        slept = 0.0
+        while slept < float(get("quota_refresh_interval") or 300):
+            step = min(5.0, float(get("quota_refresh_interval") or 300) - slept)
+            await asyncio.sleep(step)
+            slept += step

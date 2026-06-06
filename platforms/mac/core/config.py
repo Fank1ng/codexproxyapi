@@ -21,7 +21,8 @@ DEFAULTS = {
     "rotation_strategy": "round_robin",
     "max_retries": 10,
     "quota_refresh_interval": 300,
-    "quota_tracker_enabled": False,
+    "quota_tracker_enabled": True,
+    "quota_tracker_user_set": False,
     "max_request_body_mb": 512,
     "upstream_connect_timeout_sec": 10,
     "upstream_transient_retries": 2,
@@ -38,17 +39,19 @@ class ConfigError(ValueError):
 
 def load() -> dict:
     if CONFIG_PATH.exists():
-        with open(CONFIG_PATH) as f:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
             cfg = json.load(f)
     else:
         cfg = {}
+    if cfg.get("quota_tracker_enabled") is False and not cfg.get("quota_tracker_user_set"):
+        cfg["quota_tracker_enabled"] = True
     return validate({**DEFAULTS, **cfg})
 
 
 def save(cfg: dict) -> None:
     validated = validate(cfg)
     tmp_path = CONFIG_PATH.with_suffix(".json.tmp")
-    with open(tmp_path, "w") as f:
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(validated, f, indent=2)
         f.write("\n")
     tmp_path.replace(CONFIG_PATH)
@@ -112,6 +115,7 @@ def validate(cfg: dict) -> dict:
         "max_retries": int_range("max_retries", 1, 50),
         "quota_refresh_interval": int_range("quota_refresh_interval", 30, 86400),
         "quota_tracker_enabled": bool_value("quota_tracker_enabled"),
+        "quota_tracker_user_set": bool_value("quota_tracker_user_set"),
         "max_request_body_mb": int_range("max_request_body_mb", 1, 1024),
         "upstream_connect_timeout_sec": int_range("upstream_connect_timeout_sec", 1, 60),
         "upstream_transient_retries": int_range("upstream_transient_retries", 0, 5),
