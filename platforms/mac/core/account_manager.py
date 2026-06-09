@@ -249,6 +249,7 @@ class AccountPool:
         }
         self.recent_requests = deque(maxlen=50)
         self.recent_errors = deque(maxlen=20)
+        self._session_affinity: dict[str, tuple[str, float]] = {}
         self._load_recent_requests()
 
     def scan(self) -> None:
@@ -296,14 +297,66 @@ class AccountPool:
 
         return self._pick_round_robin(exclude)
 
+    def pick_for_session(
+        self,
+        session_key: str = "",
+        exclude: Optional[set[str]] = None,
+    ) -> tuple[Optional["Account"], bool]:
+        """Pick an account, preferring the previous account for this session."""
+        exclude = exclude or set()
+        if not session_key or not get("session_affinity_enabled"):
+            return self.pick(exclude=exclude), False
+
+        ttl = int(get("session_affinity_ttl_seconds") or 3600)
+        now = time.time()
+        binding = self._session_affinity.get(session_key)
+        if binding:
+            name, expires_at = binding
+            if expires_at > now:
+                account = self.get(name)
+                if account and self._is_eligible(account, exclude):
+                    return account, True
+            else:
+                self._session_affinity.pop(session_key, None)
+
+        return self.pick(exclude=exclude), False
+
+    def bind_session(self, session_key: str, account: "Account") -> None:
+        if not session_key or not get("session_affinity_enabled"):
+            return
+        ttl = int(get("session_affinity_ttl_seconds") or 3600)
+        self._session_affinity[session_key] = (account.name, time.time() + ttl)
+
+    def clear_session_binding(self, session_key: str, account: Optional["Account"] = None) -> None:
+        if not session_key:
+            return
+        binding = self._session_affinity.get(session_key)
+        if not binding:
+            return
+        if account is None or binding[0] == account.name:
+            self._session_affinity.pop(session_key, None)
+
+    def session_affinity_size(self) -> int:
+        now = time.time()
+        expired = [key for key, (_, expires_at) in self._session_affinity.items() if expires_at <= now]
+        for key in expired:
+            self._session_affinity.pop(key, None)
+        return len(self._session_affinity)
+
     def _eligible_accounts(self, exclude: set[str]) -> list["Account"]:
         return [
             acct for acct in self.accounts
-            if acct.name not in exclude
-            and acct.enabled
-            and not acct.is_rate_limited
-            and acct.access_token
+            if self._is_eligible(acct, exclude)
         ]
+
+    @staticmethod
+    def _is_eligible(account: "Account", exclude: set[str]) -> bool:
+        return (
+            account.name not in exclude
+            and account.enabled
+            and not account.is_rate_limited
+            and bool(account.access_token)
+        )
 
     def _pick_round_robin(self, exclude: set[str]) -> Optional["Account"]:
         for _ in range(len(self.accounts)):
@@ -474,6 +527,10 @@ class AccountPool:
         request_id: str = "",
         stream_mode: str = "",
         transport: str = "",
+        session_key: str = "",
+        affinity_hit: Optional[bool] = None,
+        first_byte_ms: Optional[float] = None,
+        stream_keepalive_count: Optional[int] = None,
     ) -> None:
         self.stats["total_requests"] += 1
         if status == 429:
@@ -500,10 +557,19 @@ class AccountPool:
             row["stream_mode"] = stream_mode
         if transport:
             row["transport"] = transport
+        if session_key:
+            row["session_key"] = session_key
+        if affinity_hit is not None:
+            row["affinity_hit"] = bool(affinity_hit)
+        if first_byte_ms is not None:
+            row["first_byte_ms"] = round(first_byte_ms, 1)
+        if stream_keepalive_count is not None:
+            row["stream_keepalive_count"] = int(stream_keepalive_count)
         self.recent_requests.appendleft(row)
         logger.info(
             "request_id=%s account=%s status=%s duration_ms=%.1f retries=%s "
-            "stream_mode=%s transport=%s path=%s",
+            "stream_mode=%s transport=%s session=%s affinity=%s first_byte_ms=%s "
+            "keepalives=%s path=%s",
             request_id or "-",
             account.name,
             status,
@@ -511,6 +577,10 @@ class AccountPool:
             retries,
             stream_mode or "-",
             transport or "-",
+            session_key or "-",
+            "-" if affinity_hit is None else affinity_hit,
+            "-" if first_byte_ms is None else round(first_byte_ms, 1),
+            "-" if stream_keepalive_count is None else stream_keepalive_count,
             path,
         )
         self._save_recent_requests()

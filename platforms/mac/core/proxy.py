@@ -34,7 +34,7 @@ import service_manager
 
 CODE_CLI = find_codex_cli() or "/Applications/Codex.app/Contents/Resources/codex"
 CODEX_AUTH_PATH = codex_config.CODEX_CONFIG_PATH.parent / "auth.json"
-APP_VERSION = "0.5.2"
+APP_VERSION = "0.5.3"
 
 # ── Setup ──────────────────────────────────────────────────────────────
 
@@ -410,9 +410,17 @@ async def api_status(request: web.Request) -> web.Response:
         "quota_tracker": quota_status(request.app.get("quota_task")),
         "config": {
             "codex_stream_mode": get("codex_stream_mode"),
+            "codex_stream_mode_user_set": get("codex_stream_mode_user_set"),
             "codex_hybrid_probe_seconds": get("codex_hybrid_probe_seconds"),
             "codex_hybrid_probe_bytes": get("codex_hybrid_probe_bytes"),
             "codex_stream_retry_cooldown": get("codex_stream_retry_cooldown") or get("rate_limit_cooldown"),
+            "stream_keepalive_seconds": get("stream_keepalive_seconds"),
+            "stream_bootstrap_retries": get("stream_bootstrap_retries"),
+            "nonstream_keepalive_interval": get("nonstream_keepalive_interval"),
+            "websocket_heartbeat_seconds": get("websocket_heartbeat_seconds"),
+            "session_affinity_enabled": get("session_affinity_enabled"),
+            "session_affinity_ttl_seconds": get("session_affinity_ttl_seconds"),
+            "session_affinity_size": pool.session_affinity_size(),
         },
         "model_proxy": {
             "observed": bool(recent_potential_quota_requests),
@@ -480,6 +488,8 @@ async def api_config_put(request: web.Request) -> web.Response:
         old_port = current.get("port")
         if "quota_tracker_enabled" in body:
             body["quota_tracker_user_set"] = True
+        if "codex_stream_mode" in body:
+            body["codex_stream_mode_user_set"] = True
         current.update(body)
         save(current)
         updated = load()

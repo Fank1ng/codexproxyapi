@@ -27,10 +27,17 @@ DEFAULTS = {
     "upstream_connect_timeout_sec": 10,
     "upstream_transient_retries": 2,
     "upstream_transient_backoff_ms": 250,
-    "codex_stream_mode": "hybrid",
+    "codex_stream_mode": "realtime",
+    "codex_stream_mode_user_set": False,
     "codex_hybrid_probe_seconds": 8,
     "codex_hybrid_probe_bytes": 262144,
     "codex_stream_retry_cooldown": 0,
+    "stream_keepalive_seconds": 15,
+    "stream_bootstrap_retries": 1,
+    "nonstream_keepalive_interval": 15,
+    "websocket_heartbeat_seconds": 0,
+    "session_affinity_enabled": True,
+    "session_affinity_ttl_seconds": 3600,
     "quota_weight_5h": 0.5,
     "quota_weight_7d": 0.5,
     "log_level": "INFO",
@@ -125,13 +132,26 @@ def validate(cfg: dict) -> dict:
         "upstream_transient_retries": int_range("upstream_transient_retries", 0, 5),
         "upstream_transient_backoff_ms": int_range("upstream_transient_backoff_ms", 0, 5000),
         "codex_stream_mode": str(merged.get("codex_stream_mode", DEFAULTS["codex_stream_mode"])).lower(),
+        "codex_stream_mode_user_set": bool_value("codex_stream_mode_user_set"),
         "codex_hybrid_probe_seconds": int_range("codex_hybrid_probe_seconds", 0, 120),
         "codex_hybrid_probe_bytes": int_range("codex_hybrid_probe_bytes", 1024, 10485760),
         "codex_stream_retry_cooldown": int_range("codex_stream_retry_cooldown", 0, 3600),
+        "stream_keepalive_seconds": int_range("stream_keepalive_seconds", 0, 300),
+        "stream_bootstrap_retries": int_range("stream_bootstrap_retries", 0, 5),
+        "nonstream_keepalive_interval": int_range("nonstream_keepalive_interval", 0, 300),
+        "websocket_heartbeat_seconds": int_range("websocket_heartbeat_seconds", 0, 300),
+        "session_affinity_enabled": bool_value("session_affinity_enabled"),
+        "session_affinity_ttl_seconds": int_range("session_affinity_ttl_seconds", 60, 86400),
         "quota_weight_5h": float_range("quota_weight_5h", 0, 1),
         "quota_weight_7d": float_range("quota_weight_7d", 0, 1),
         "log_level": str(merged.get("log_level", DEFAULTS["log_level"])).upper(),
     }
+
+    if (
+        normalized["codex_stream_mode"] == "hybrid"
+        and not normalized["codex_stream_mode_user_set"]
+    ):
+        normalized["codex_stream_mode"] = "realtime"
 
     if normalized["rotation_strategy"] not in {"round_robin", "most_available"}:
         errors.append("rotation_strategy must be round_robin or most_available")

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.5.3 - 2026-06-09
+
+- Fixed Codex CLI compact requests so `/v1/responses/compact` no longer requires a `response.completed` event before returning a successful compact response.
+- Preserved completion-marker enforcement for normal Codex response streams while avoiding false `stream_interrupted` cooldowns for compact responses.
+- Switched Codex response streaming to realtime by default, with SSE keepalives, bootstrap retry limits, disabled proxy-initiated WebSocket heartbeat, and session affinity for long Codex tasks.
+- Synced the macOS packaged core with the shared proxy fix.
+
 ## v0.5.2 - 2026-06-07
 
 - Routed Codex `/v1/responses` traffic through the ChatGPT Codex backend while preserving the OpenAI Responses wire API configuration.

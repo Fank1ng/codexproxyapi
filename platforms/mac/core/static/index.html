@@ -57,6 +57,9 @@ button:hover{border-color:var(--blue)}
     <div class="card"><div class="num" id="strategy">-</div><div class="label">选择策略</div></div>
     <div class="card"><div class="num" id="requests">-</div><div class="label">总请求</div></div>
     <div class="card"><div class="num" id="stream-mode">-</div><div class="label">Codex 流模式</div></div>
+    <div class="card"><div class="num" id="keepalive">-</div><div class="label">SSE 保活 / 首字节重试</div></div>
+    <div class="card"><div class="num" id="ws-heartbeat">-</div><div class="label">WebSocket 心跳</div></div>
+    <div class="card"><div class="num" id="affinity">-</div><div class="label">会话绑定</div></div>
   </section>
 
   <section class="card">
@@ -116,18 +119,25 @@ function renderStatus(status) {
   document.getElementById('strategy').textContent = status.strategy || '-';
   document.getElementById('requests').textContent = status.stats?.total_requests ?? '-';
   document.getElementById('stream-mode').textContent = status.config?.codex_stream_mode || status.codex_stream_mode || '-';
+  document.getElementById('keepalive').textContent = `${status.config?.stream_keepalive_seconds ?? '-'}s / ${status.config?.stream_bootstrap_retries ?? '-'}`;
+  document.getElementById('ws-heartbeat').textContent = status.config?.websocket_heartbeat_seconds ? `${status.config.websocket_heartbeat_seconds}s` : '关闭';
+  document.getElementById('affinity').textContent = status.config?.session_affinity_enabled ? `开 ${status.config?.session_affinity_size ?? 0}` : '关';
+  document.getElementById('stream-mode').className = rowsHasBuffered(status.recent_requests || []) ? 'num warn' : 'num ok';
 
   const rows = (status.recent_requests || []).slice(0, 12);
   if (!rows.length) {
     document.getElementById('recent').innerHTML = '<p>暂无请求记录。</p>';
   } else {
-    document.getElementById('recent').innerHTML = `<table><thead><tr><th>时间</th><th>账号</th><th>状态</th><th>传输</th><th>流</th><th>路径</th><th>ID</th></tr></thead><tbody>${
+    document.getElementById('recent').innerHTML = `<table><thead><tr><th>时间</th><th>账号</th><th>状态</th><th>传输</th><th>流</th><th>首字节</th><th>保活</th><th>会话</th><th>路径</th><th>ID</th></tr></thead><tbody>${
       rows.map(row => `<tr>
         <td>${esc(row.at ? new Date(row.at * 1000).toLocaleTimeString() : '-')}</td>
         <td>${esc(row.account || '-')}</td>
         <td>${statusLabel(row.status)}</td>
         <td>${esc(row.transport || '-')}</td>
-        <td>${esc(row.stream_mode || '-')}</td>
+        <td class="${row.stream_mode === 'hybrid-buffered' ? 'warn' : ''}">${esc(row.stream_mode || '-')}</td>
+        <td>${row.first_byte_ms == null ? '-' : `${esc(row.first_byte_ms)}ms`}</td>
+        <td>${row.stream_keepalive_count ?? '-'}</td>
+        <td>${row.session_key ? `${esc(row.session_key)}${row.affinity_hit ? ' 命中' : ''}` : '-'}</td>
         <td><code>${esc(row.path || '-')}</code></td>
         <td><code>${esc(row.request_id || '-')}</code></td>
       </tr>`).join('')
@@ -240,6 +250,10 @@ function accountState(account) {
   if (!account.enabled) return '<span class="warn">已禁用</span>';
   if (account.rate_limited) return `<span class="warn">${esc(account.cooldown_reason || '冷却中')}</span>`;
   return '<span class="ok">可用</span>';
+}
+
+function rowsHasBuffered(rows) {
+  return rows.some(row => row.stream_mode === 'hybrid-buffered');
 }
 
 function esc(value) {
