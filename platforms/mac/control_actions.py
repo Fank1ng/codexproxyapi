@@ -27,6 +27,7 @@ HEALTH_URL = "http://127.0.0.1:8800/api/health"
 CODEX_AUTH_PATH = codex_config.CODEX_CONFIG_PATH.parent / "auth.json"
 CODEX_APP_PATH = Path("/Applications/Codex.app")
 CODEX_CLI_INSTALL_HINT = "请先安装 Codex App，或确保 codex 命令在 PATH 中。"
+UPDATE_LOCK_DIR = service_manager.RUNTIME_DIR / ".update.lock"
 
 KEY_LABELS = {
     "action": "动作",
@@ -54,6 +55,13 @@ KEY_LABELS = {
     "refreshed": "已刷新",
     "auth_error": "认证异常",
     "previous_auth_error": "原异常状态",
+    "previous_version": "更新前版本",
+    "expected_version": "目标版本",
+    "version": "当前版本",
+    "updated": "已更新",
+    "rolled_back": "已回滚",
+    "backup_path": "备份路径",
+    "restart_started": "已发起重启",
     "source_app": "App 入口",
     "app_bundle": "App 位置",
     "resource_runtime_dir": "App 内置运行资源",
@@ -110,6 +118,7 @@ VALUE_LABELS = {
     ),
     "codex_cli_missing": "未找到 Codex CLI",
     "codex_app_missing": "未找到 Codex App",
+    "update already in progress": "正在应用更新，请稍后再试",
 }
 
 
@@ -233,6 +242,13 @@ def compact(data: dict) -> str:
         "refreshed",
         "auth_error",
         "previous_auth_error",
+        "previous_version",
+        "expected_version",
+        "version",
+        "updated",
+        "rolled_back",
+        "backup_path",
+        "restart_started",
     )
     localized = {
         KEY_LABELS.get(key, key): _localized_value(data.get(key))
@@ -339,14 +355,88 @@ def restart_proxy() -> dict:
     }
 
 
+def _acquire_update_lock() -> Optional[Path]:
+    service_manager.RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        UPDATE_LOCK_DIR.mkdir()
+        (UPDATE_LOCK_DIR / "pid").write_text(str(os.getpid()), encoding="utf-8")
+        return UPDATE_LOCK_DIR
+    except FileExistsError:
+        return None
+
+
+def _release_update_lock(lock: Optional[Path]) -> None:
+    if not lock:
+        return
+    shutil.rmtree(lock, ignore_errors=True)
+
+
 def apply_update() -> dict:
+    lock = _acquire_update_lock()
+    if not lock:
+        return {
+            "action": "apply_update",
+            "updated": False,
+            "rolled_back": False,
+            "error": "update already in progress",
+        }
+
+    backup_path = None
+    previous_proxy = proxy_status(timeout=2)
+    previous_version = previous_proxy.get("version") if previous_proxy else None
     expected_version = source_app_version()
-    service = service_manager.install(sync=True)
     restart_started = False
-    if not service.get("restart_required"):
-        restart_started = service_manager.restart()
-    proxy = wait_for_proxy(expected_version=expected_version or None)
-    return {
+    service = {}
+    proxy = None
+    error = ""
+    rolled_back = False
+    updated = False
+    try:
+        try:
+            service = service_manager.install(sync=True, keep_backup=True)
+            sync_result = service.get("sync") or {}
+            backup_path = sync_result.get("backup_path")
+        except service_manager.RuntimeSyncError as e:
+            return {
+                "action": "apply_update",
+                "installed": None,
+                "loaded": None,
+                "needs_repair": None,
+                "running": False,
+                "version": previous_version,
+                "previous_version": previous_version,
+                "expected_version": expected_version,
+                "updated": False,
+                "rolled_back": e.restored,
+                "backup_path": str(e.backup_path) if e.backup_path else None,
+                "error": str(e),
+                "restore_error": e.restore_error,
+            }
+
+        if not service.get("restart_required"):
+            restart_started = service_manager.restart()
+        proxy = wait_for_proxy(expected_version=expected_version or None)
+        updated = bool(proxy and (not expected_version or proxy.get("version") == expected_version))
+        if updated:
+            service_manager.cleanup_runtime_backup(backup_path)
+            backup_path = None
+        else:
+            observed = proxy.get("version") if proxy else None
+            error = f"proxy did not report expected version {expected_version or '-'}"
+            if observed:
+                error += f" (observed {observed})"
+            if backup_path:
+                try:
+                    service_manager.rollback_runtime(backup_path)
+                    rolled_back = True
+                    if not service.get("restart_required"):
+                        service_manager.restart()
+                except Exception as e:
+                    error += f"; rollback failed: {e}"
+    finally:
+        _release_update_lock(lock)
+
+    result = {
         "action": "apply_update",
         "installed": service.get("installed"),
         "loaded": service.get("loaded"),
@@ -355,12 +445,19 @@ def apply_update() -> dict:
         "active_accounts": proxy.get("active_accounts") if proxy else None,
         "total_accounts": proxy.get("total_accounts") if proxy else None,
         "version": proxy.get("version") if proxy else None,
+        "previous_version": previous_version,
         "expected_version": expected_version,
+        "updated": updated,
+        "rolled_back": rolled_back,
+        "backup_path": backup_path,
         "restart_started": restart_started,
         "source_dir": service.get("source_dir"),
         "runtime_dir": service.get("runtime_dir"),
         "restart_required": service.get("restart_required"),
     }
+    if error:
+        result["error"] = error
+    return result
 
 
 def enable_codex_proxy() -> dict:

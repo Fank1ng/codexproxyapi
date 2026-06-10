@@ -1,11 +1,14 @@
 """macOS LaunchAgent helpers for keeping the proxy alive outside Codex."""
 
 import os
+import json
 import plistlib
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+from typing import Optional
 
 from config import CONFIG_DIR
 
@@ -37,6 +40,22 @@ COPY_FILES = {
 }
 COPY_DIRS = {"static", "vendor", "python"}
 ACCOUNT_FILES = {"auth.json", "account.json", "quota.json"}
+SYNC_MANIFEST = ".sync-manifest.json"
+
+
+class RuntimeSyncError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        backup_path: Optional[Path] = None,
+        restored: bool = False,
+        restore_error: str = "",
+    ):
+        super().__init__(message)
+        self.backup_path = backup_path
+        self.restored = restored
+        self.restore_error = restore_error
 
 
 def status() -> dict:
@@ -78,12 +97,13 @@ def status() -> dict:
     }
 
 
-def install(*, sync: bool = True) -> dict:
+def install(*, sync: bool = True, keep_backup: bool = False) -> dict:
     if sys.platform != "darwin":
         raise RuntimeError("LaunchAgent is only supported on macOS")
     _migrate_legacy_runtime()
+    sync_result = None
     if sync or not (RUNTIME_DIR / "proxy.py").exists():
-        _sync_runtime_dir()
+        sync_result = _sync_runtime_dir(keep_backup=keep_backup)
     codex_proxy = None
     codex_proxy_error = None
     try:
@@ -107,6 +127,7 @@ def install(*, sync: bool = True) -> dict:
     result["codex_proxy"] = codex_proxy
     result["codex_proxy_error"] = codex_proxy_error
     result["restart_required"] = _inside_launchagent()
+    result["sync"] = sync_result
     return result
 
 
@@ -162,28 +183,179 @@ def _plist() -> dict:
     }
 
 
-def _sync_runtime_dir() -> None:
+def _sync_runtime_dir(*, keep_backup: bool = False) -> dict:
     _migrate_legacy_runtime()
     source = _source_dir().resolve()
     target = RUNTIME_DIR.resolve()
     if source == target:
-        return
+        return {"changed": False, "source_dir": str(source), "runtime_dir": str(target)}
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-    _sync_core_files(source, target)
+    stamp = f"{int(time.time())}-{os.getpid()}"
+    staging = target.parent / f".{target.name}.update-staging-{stamp}"
+    backup = target.parent / f".{target.name}.update-backup-{stamp}"
+    try:
+        _build_runtime_staging(source, staging)
+        _apply_staged_runtime(staging, target, backup)
+    except RuntimeSyncError:
+        raise
+    except Exception as e:
+        restored = False
+        restore_error = ""
+        if backup.exists():
+            try:
+                _restore_runtime_backup(target, backup)
+                restored = True
+            except Exception as restore_exc:
+                restore_error = str(restore_exc)
+        raise RuntimeSyncError(
+            str(e),
+            backup_path=backup if backup.exists() else None,
+            restored=restored,
+            restore_error=restore_error,
+        ) from e
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+    _sync_accounts_dir(source / "accounts", target / "accounts")
+    if not keep_backup and backup.exists():
+        shutil.rmtree(backup, ignore_errors=True)
+    return {
+        "changed": True,
+        "source_dir": str(source),
+        "runtime_dir": str(target),
+        "backup_path": str(backup) if backup.exists() else None,
+    }
+
+
+def rollback_runtime(backup_path) -> dict:
+    backup = Path(backup_path).expanduser()
+    if not backup.exists():
+        raise FileNotFoundError(f"runtime backup not found: {backup}")
+    _restore_runtime_backup(RUNTIME_DIR.resolve(), backup)
+    return {"rolled_back": True, "backup_path": str(backup), "runtime_dir": str(RUNTIME_DIR)}
+
+
+def cleanup_runtime_backup(backup_path) -> None:
+    if not backup_path:
+        return
+    backup = Path(backup_path).expanduser()
+    if backup.exists():
+        shutil.rmtree(backup, ignore_errors=True)
+
+
+def _build_runtime_staging(source: Path, staging: Path) -> None:
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True, exist_ok=True)
+    _sync_core_files(source, staging)
     for name in COPY_FILES:
         src = _source_file(source, name)
         if src.exists():
-            if name == "config.json" and (RUNTIME_DIR / name).exists():
-                continue
-            shutil.copy2(src, RUNTIME_DIR / name)
+            shutil.copy2(src, staging / name)
     for name in COPY_DIRS:
         src = _source_dir_entry(source, name)
         if src.exists():
-            dst = target / name
-            if dst.exists():
-                shutil.rmtree(dst)
-            shutil.copytree(src, dst, symlinks=True)
-    _sync_accounts_dir(source / "accounts", target / "accounts")
+            shutil.copytree(src, staging / name, symlinks=True)
+    _validate_runtime_staging(staging)
+
+
+def _validate_runtime_staging(staging: Path) -> None:
+    required = ("account_manager.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py")
+    missing = [name for name in required if not (staging / name).is_file()]
+    if missing:
+        raise RuntimeSyncError(f"runtime staging missing required files: {', '.join(missing)}")
+    if not (staging / "static").is_dir():
+        raise RuntimeSyncError("runtime staging missing static directory")
+    auth_leak = next(staging.rglob("auth.json"), None)
+    if auth_leak:
+        raise RuntimeSyncError(f"refusing runtime staging with credential file: {auth_leak}")
+
+
+def _apply_staged_runtime(staging: Path, target: Path, backup: Path) -> None:
+    if backup.exists():
+        shutil.rmtree(backup)
+    backup.mkdir(parents=True, exist_ok=True)
+    manifest = []
+    entries: list[tuple[str, Path, Path, str]] = []
+    for name in sorted(COPY_FILES):
+        src = staging / name
+        if not src.exists():
+            continue
+        dst = target / name
+        if name == "config.json" and dst.exists():
+            continue
+        entries.append((name, src, dst, "file"))
+    for name in sorted(COPY_DIRS):
+        src = staging / name
+        if src.exists():
+            entries.append((name, src, target / name, "dir"))
+
+    for name, _src, dst, kind in entries:
+        backup_dst = backup / name
+        existed = dst.exists()
+        manifest.append({"name": name, "kind": kind, "existed": existed})
+        if existed:
+            if dst.is_dir():
+                shutil.copytree(dst, backup_dst, symlinks=True)
+            else:
+                backup_dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(dst, backup_dst)
+    (backup / SYNC_MANIFEST).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    try:
+        for _name, src, dst, _kind in entries:
+            _remove_entry(dst)
+            _copy_staged_entry(src, dst)
+    except Exception as e:
+        restored = False
+        restore_error = ""
+        try:
+            _restore_runtime_backup(target, backup)
+            restored = True
+        except Exception as restore_exc:
+            restore_error = str(restore_exc)
+        raise RuntimeSyncError(
+            str(e),
+            backup_path=backup,
+            restored=restored,
+            restore_error=restore_error,
+        ) from e
+
+
+def _copy_staged_entry(src: Path, dst: Path) -> None:
+    if src.is_dir():
+        shutil.copytree(src, dst, symlinks=True)
+    else:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+
+
+def _restore_runtime_backup(target: Path, backup: Path) -> None:
+    manifest_path = backup / SYNC_MANIFEST
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    else:
+        manifest = [
+            {"name": item.name, "kind": "dir" if item.is_dir() else "file", "existed": True}
+            for item in backup.iterdir()
+            if item.name != SYNC_MANIFEST
+        ]
+    for item in manifest:
+        name = item["name"]
+        dst = target / name
+        _remove_entry(dst)
+        if not item.get("existed"):
+            continue
+        src = backup / name
+        if src.exists():
+            _copy_staged_entry(src, dst)
+
+
+def _remove_entry(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    elif path.exists() or path.is_symlink():
+        path.unlink()
 
 
 def _sync_core_files(source: Path, target: Path) -> None:

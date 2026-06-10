@@ -486,6 +486,45 @@ class ControlActionsTests(unittest.TestCase):
         self.assertEqual(result["version"], "0.5.3")
         self.assertEqual(proxy_status.call_count, 2)
 
+    def test_apply_update_returns_busy_when_lock_exists(self):
+        with mock.patch("control_actions._acquire_update_lock", return_value=None):
+            result = control_actions.apply_update()
+
+        self.assertFalse(result["updated"])
+        self.assertFalse(result["rolled_back"])
+        self.assertEqual(result["error"], "update already in progress")
+
+    def test_apply_update_rolls_back_when_expected_version_never_starts(self):
+        backup = Path(tempfile.mkdtemp()) / "backup"
+        backup.mkdir()
+        lock = Path(tempfile.mkdtemp()) / "lock"
+        lock.mkdir()
+        service = {
+            "installed": True,
+            "loaded": True,
+            "needs_repair": False,
+            "restart_required": False,
+            "source_dir": "/source",
+            "runtime_dir": "/runtime",
+            "sync": {"backup_path": str(backup)},
+        }
+        with mock.patch("control_actions._acquire_update_lock", return_value=lock), \
+                mock.patch("control_actions.proxy_status", return_value={"version": "0.5.3"}), \
+                mock.patch("control_actions.source_app_version", return_value="0.5.4"), \
+                mock.patch("control_actions.service_manager.install", return_value=service), \
+                mock.patch("control_actions.service_manager.restart", return_value=True), \
+                mock.patch("control_actions.wait_for_proxy", return_value=None), \
+                mock.patch("control_actions.service_manager.rollback_runtime", return_value={"rolled_back": True}) as rollback:
+            result = control_actions.apply_update()
+
+        self.assertFalse(result["updated"])
+        self.assertTrue(result["rolled_back"])
+        self.assertEqual(result["previous_version"], "0.5.3")
+        self.assertEqual(result["expected_version"], "0.5.4")
+        self.assertEqual(result["backup_path"], str(backup))
+        self.assertIn("expected version 0.5.4", result["error"])
+        rollback.assert_called_once_with(str(backup))
+
     def test_render_output_json_keeps_machine_readable_keys(self):
         payload = {
             "action": "status",
@@ -509,7 +548,13 @@ class ControlActionsTests(unittest.TestCase):
         self.assertIn("列出账号", rendered)
 
 
-class ServiceManagerTests(unittest.TestCase):
+class ServiceManagerRuntimeTests(unittest.TestCase):
+    def _write_minimal_runtime_source(self, source: Path) -> None:
+        for name in ("account_manager.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py"):
+            (source / name).write_text(f"# {name}\n")
+        (source / "static").mkdir(exist_ok=True)
+        (source / "static" / "index.html").write_text("static\n")
+
     def test_migrate_legacy_runtime_copies_without_removing_old_data(self):
         with tempfile.TemporaryDirectory() as old_tmp, tempfile.TemporaryDirectory() as parent_tmp:
             old_runtime = Path(old_tmp)
@@ -532,6 +577,8 @@ class ServiceManagerTests(unittest.TestCase):
             (source / "static").mkdir()
             (source / "proxy.py").write_text("# new proxy\n")
             (source / "config.json").write_text('{"port": 8801}\n')
+            for name in ("account_manager.py", "config.py", "proxy_core.py", "service_manager.py"):
+                (source / name).write_text(f"# new {name}\n")
             (source / "python" / "bin" / "python3").write_text("new-python\n")
             (source / "vendor" / "pkg.txt").write_text("new-vendor\n")
             (source / "static" / "index.html").write_text("new-static\n")
@@ -553,6 +600,61 @@ class ServiceManagerTests(unittest.TestCase):
             self.assertEqual((runtime / "python" / "bin" / "python3").read_text(), "new-python\n")
             self.assertEqual((runtime / "vendor" / "pkg.txt").read_text(), "new-vendor\n")
             self.assertEqual((runtime / "static" / "index.html").read_text(), "new-static\n")
+            self.assertEqual((runtime / "config.json").read_text(), '{"port": 8800}\n')
+            self.assertEqual((runtime / "accounts" / "a" / "auth.json").read_text(), "{}\n")
+
+    def test_sync_runtime_staging_failure_preserves_existing_runtime(self):
+        with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as runtime_tmp:
+            source = Path(source_tmp)
+            runtime = Path(runtime_tmp)
+            (source / "config.json").write_text('{"port": 9999}\n')
+            (runtime / "proxy.py").write_text("# old proxy\n")
+            (runtime / "static").mkdir()
+            (runtime / "static" / "index.html").write_text("old-static\n")
+
+            with mock.patch.dict(os.environ, {service_manager.SOURCE_DIR_ENV: str(source)}), \
+                    mock.patch.object(service_manager, "RUNTIME_DIR", runtime):
+                with self.assertRaises(service_manager.RuntimeSyncError):
+                    service_manager._sync_runtime_dir()
+
+            self.assertEqual((runtime / "proxy.py").read_text(), "# old proxy\n")
+            self.assertEqual((runtime / "static" / "index.html").read_text(), "old-static\n")
+
+    def test_sync_runtime_copy_failure_rolls_back_code_and_preserves_user_state(self):
+        with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as runtime_tmp:
+            source = Path(source_tmp)
+            runtime = Path(runtime_tmp)
+            for name in ("account_manager.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py"):
+                (source / name).write_text(f"# new {name}\n")
+                (runtime / name).write_text(f"# old {name}\n")
+            (source / "config.json").write_text('{"port": 9999}\n')
+            (runtime / "config.json").write_text('{"port": 8800}\n')
+            for dirname in ("python", "static", "vendor"):
+                (source / dirname).mkdir()
+                (runtime / dirname).mkdir()
+                (source / dirname / "marker.txt").write_text(f"new-{dirname}\n")
+                (runtime / dirname / "marker.txt").write_text(f"old-{dirname}\n")
+            (runtime / "accounts" / "a").mkdir(parents=True)
+            (runtime / "accounts" / "a" / "auth.json").write_text("{}\n")
+
+            original_copy = service_manager._copy_staged_entry
+
+            def flaky_copy(src, dst):
+                if src.name == "vendor" and "update-staging" in str(src):
+                    raise OSError("copy vendor failed")
+                original_copy(src, dst)
+
+            with mock.patch.dict(os.environ, {service_manager.SOURCE_DIR_ENV: str(source)}), \
+                    mock.patch.object(service_manager, "RUNTIME_DIR", runtime), \
+                    mock.patch.object(service_manager, "_copy_staged_entry", side_effect=flaky_copy):
+                with self.assertRaises(service_manager.RuntimeSyncError) as raised:
+                    service_manager._sync_runtime_dir()
+
+            self.assertTrue(raised.exception.restored)
+            self.assertEqual((runtime / "proxy.py").read_text(), "# old proxy.py\n")
+            self.assertEqual((runtime / "python" / "marker.txt").read_text(), "old-python\n")
+            self.assertEqual((runtime / "static" / "marker.txt").read_text(), "old-static\n")
+            self.assertEqual((runtime / "vendor" / "marker.txt").read_text(), "old-vendor\n")
             self.assertEqual((runtime / "config.json").read_text(), '{"port": 8800}\n')
             self.assertEqual((runtime / "accounts" / "a" / "auth.json").read_text(), "{}\n")
 
@@ -1959,6 +2061,12 @@ class CodexConfigTests(unittest.TestCase):
 
 
 class ServiceManagerTests(unittest.TestCase):
+    def _write_minimal_runtime_source(self, source: Path) -> None:
+        for name in ("account_manager.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py"):
+            (source / name).write_text(f"# {name}\n")
+        (source / "static").mkdir(exist_ok=True)
+        (source / "static" / "index.html").write_text("static\n")
+
     def test_source_dir_prefers_launchagent_environment(self):
         root = Path(tempfile.mkdtemp())
         with mock.patch.dict(os.environ, {service_manager.SOURCE_DIR_ENV: str(root)}):
@@ -2016,6 +2124,7 @@ class ServiceManagerTests(unittest.TestCase):
     def test_sync_runtime_dir_uses_configured_source(self):
         source = Path(tempfile.mkdtemp())
         runtime = Path(tempfile.mkdtemp())
+        self._write_minimal_runtime_source(source)
         (source / "proxy.py").write_text("from source")
 
         with mock.patch.object(service_manager, "RUNTIME_DIR", runtime), mock.patch.dict(
@@ -2028,6 +2137,7 @@ class ServiceManagerTests(unittest.TestCase):
     def test_sync_runtime_dir_preserves_existing_config(self):
         source = Path(tempfile.mkdtemp())
         runtime = Path(tempfile.mkdtemp())
+        self._write_minimal_runtime_source(source)
         (source / "config.json").write_text('{"port": 9999}\n')
         (runtime / "config.json").write_text('{"port": 8800}\n')
 
