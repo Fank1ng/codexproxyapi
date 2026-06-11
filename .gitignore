@@ -23,3 +23,5 @@ __pycache__/
 .env
 *.log
 recent_requests.json
+usage_history.sqlite
+usage_stats.json

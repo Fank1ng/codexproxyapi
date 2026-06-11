@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Optional
 
 from config import CONFIG_DIR
+from runtime_manifest import BUILD_MANIFEST, RUNTIME_MANIFEST, ManifestError, compare_runtime_to_bundle, write_manifest
+from version import DEFAULT_VERSION, app_version
 
 LABEL = "com.fank1ng.xiaolachang"
 OLD_LABEL = "com.fank1ng.codexproxyapi"
@@ -24,7 +26,9 @@ OLD_RUNTIME_DIR = Path.home() / "Library" / "Application Support" / "codexproxya
 LOG_PATH = RUNTIME_DIR / "proxy.log"
 COPY_FILES = {
     ".gitignore",
+    "VERSION",
     "account_manager.py",
+    "build_manifest.json",
     "control_actions.py",
     "control_panel.py",
     "codex_config.py",
@@ -34,9 +38,11 @@ COPY_FILES = {
     "proxy.py",
     "proxy_core.py",
     "quota_tracker.py",
+    "runtime_manifest.py",
     "requirements.txt",
     "service_manager.py",
     "usage_stats.py",
+    "version.py",
 }
 COPY_DIRS = {"static", "vendor", "python"}
 ACCOUNT_FILES = {"auth.json", "account.json", "quota.json"}
@@ -86,6 +92,7 @@ def status() -> dict:
         or (PLIST_PATH.exists() and repair_reasons)
     )
     needs_repair = bool((PLIST_PATH.exists() and repair_reasons) or migration_required)
+    manifest = runtime_integrity(source=source, runtime=RUNTIME_DIR)
     return {
         "supported": sys.platform == "darwin",
         "label": LABEL,
@@ -111,6 +118,11 @@ def status() -> dict:
         "expected_program": expected_program,
         "expected_version": expected_version,
         "running_version": running_version,
+        "bundle_version": manifest.get("bundle_version", expected_version),
+        "runtime_version": manifest.get("runtime_version", running_version),
+        "manifest_ok": manifest.get("ok", False),
+        "manifest_error": manifest.get("error", ""),
+        "manifest": manifest,
         "version_mismatch": version_mismatch,
         "migration_required": migration_required,
         "needs_repair": needs_repair,
@@ -243,6 +255,7 @@ def _sync_runtime_dir(*, keep_backup: bool = False) -> dict:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
     _sync_accounts_dir(source / "accounts", target / "accounts")
+    write_manifest(target, manifest_name=RUNTIME_MANIFEST)
     if not keep_backup and backup.exists():
         shutil.rmtree(backup, ignore_errors=True)
     return {
@@ -258,6 +271,10 @@ def rollback_runtime(backup_path) -> dict:
     if not backup.exists():
         raise FileNotFoundError(f"runtime backup not found: {backup}")
     _restore_runtime_backup(RUNTIME_DIR.resolve(), backup)
+    try:
+        write_manifest(RUNTIME_DIR.resolve(), manifest_name=RUNTIME_MANIFEST)
+    except Exception:
+        pass
     return {"rolled_back": True, "backup_path": str(backup), "runtime_dir": str(RUNTIME_DIR)}
 
 
@@ -286,12 +303,20 @@ def _build_runtime_staging(source: Path, staging: Path) -> None:
 
 
 def _validate_runtime_staging(staging: Path) -> None:
-    required = ("account_manager.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py")
+    required = ("account_manager.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py", "version.py", "runtime_manifest.py", "VERSION")
     missing = [name for name in required if not (staging / name).is_file()]
     if missing:
         raise RuntimeSyncError(f"runtime staging missing required files: {', '.join(missing)}")
     if not (staging / "static").is_dir():
         raise RuntimeSyncError("runtime staging missing static directory")
+    if (staging / BUILD_MANIFEST).exists():
+        try:
+            write_manifest(staging, manifest_name=RUNTIME_MANIFEST)
+            check = compare_runtime_to_bundle(staging, staging)
+        except ManifestError as e:
+            raise RuntimeSyncError(str(e)) from e
+        if not check.get("ok"):
+            raise RuntimeSyncError(f"runtime staging manifest mismatch: {check}")
     auth_leak = next(staging.rglob("auth.json"), None)
     if auth_leak:
         raise RuntimeSyncError(f"refusing runtime staging with credential file: {auth_leak}")
@@ -635,6 +660,10 @@ def _installed_program() -> str:
 
 
 def _proxy_version(proxy_file: Path) -> str:
+    version_root = proxy_file.parent if proxy_file.name == "proxy.py" else proxy_file
+    version_value = app_version(version_root)
+    if version_value and version_value != DEFAULT_VERSION:
+        return version_value
     try:
         text = proxy_file.read_text(encoding="utf-8")
     except OSError:
@@ -645,6 +674,28 @@ def _proxy_version(proxy_file: Path) -> str:
             _, _, value = stripped.partition("=")
             return value.strip().strip('"\'')
     return ""
+
+
+def runtime_integrity(*, source: Optional[Path] = None, runtime: Optional[Path] = None) -> dict:
+    source = Path(source) if source else _source_dir()
+    runtime = Path(runtime) if runtime else RUNTIME_DIR
+    result = {
+        "ok": False,
+        "bundle_runtime_dir": str(source),
+        "runtime_dir": str(runtime),
+        "bundle_version": _proxy_version(_source_file(source, "proxy.py")),
+        "runtime_version": _proxy_version(runtime / "proxy.py"),
+    }
+    try:
+        compare = compare_runtime_to_bundle(source, runtime)
+        result.update(compare)
+        result["bundle_version"] = compare.get("expected_version") or result["bundle_version"]
+        result["runtime_version"] = compare.get("observed_version") or result["runtime_version"]
+    except ManifestError as e:
+        result["error"] = str(e)
+    except Exception as e:
+        result["error"] = f"manifest check failed: {e}"
+    return result
 
 
 def _run(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:

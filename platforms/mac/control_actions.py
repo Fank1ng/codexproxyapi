@@ -6,7 +6,6 @@ import asyncio
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import time
@@ -61,6 +60,14 @@ KEY_LABELS = {
     "previous_version": "更新前版本",
     "expected_version": "目标版本",
     "version": "当前版本",
+    "bundle_version": "App 内置版本",
+    "runtime_version": "运行目录版本",
+    "proxy_version": "后台 API 版本",
+    "manifest_ok": "Manifest 一致",
+    "manifest_error": "Manifest 错误",
+    "token_usage_api_ok": "Token 汇总接口",
+    "token_usage_events_api_ok": "Token 事件接口",
+    "frontend_restart_required": "需要重开前台",
     "updated": "已更新",
     "rolled_back": "已回滚",
     "backup_path": "备份路径",
@@ -73,6 +80,7 @@ KEY_LABELS = {
     "result_path": "结果文件",
     "python": "Python",
     "pythonpath": "Python 包路径",
+    "installed_program": "LaunchAgent 程序",
     "codex_cli_found": "Codex CLI 已找到",
     "codex_cli": "Codex CLI",
     "codex_app_found": "Codex App 已找到",
@@ -176,12 +184,7 @@ def wait_for_proxy(timeout: float = 25.0, expected_version: Optional[str] = None
 def source_app_version(source_dir: Optional[str] = None) -> str:
     source = Path(source_dir).expanduser() if source_dir else service_manager._source_dir()
     proxy_file = service_manager._source_file(source, "proxy.py")
-    try:
-        text = proxy_file.read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    match = re.search(r'^APP_VERSION\s*=\s*[\'"]([^\'"]+)[\'"]', text, re.MULTILINE)
-    return match.group(1) if match else ""
+    return service_manager._proxy_version(proxy_file)
 
 
 def _localized_value(value):
@@ -251,6 +254,14 @@ def compact(data: dict) -> str:
         "previous_version",
         "expected_version",
         "version",
+        "bundle_version",
+        "runtime_version",
+        "proxy_version",
+        "manifest_ok",
+        "manifest_error",
+        "token_usage_api_ok",
+        "token_usage_events_api_ok",
+        "frontend_restart_required",
         "updated",
         "rolled_back",
         "backup_path",
@@ -284,9 +295,15 @@ def codex_dependency_status() -> dict:
 
 def runtime_status(source_dir: Optional[str] = None) -> dict:
     source = Path(source_dir).expanduser() if source_dir else service_manager._source_dir()
+    integrity = service_manager.runtime_integrity(source=source, runtime=service_manager.RUNTIME_DIR)
     return {
         "runtime_exists": service_manager.RUNTIME_DIR.exists(),
         "resource_runtime_exists": source.exists(),
+        "bundle_version": integrity.get("bundle_version", ""),
+        "runtime_version": integrity.get("runtime_version", ""),
+        "manifest_ok": integrity.get("ok", False),
+        "manifest_error": integrity.get("error", ""),
+        "manifest": integrity,
     }
 
 
@@ -438,6 +455,43 @@ def _release_update_lock(lock: Optional[Path]) -> None:
     shutil.rmtree(lock, ignore_errors=True)
 
 
+def _post_update_validation(proxy: Optional[dict], expected_version: str) -> tuple[bool, dict, str]:
+    service = service_manager.status()
+    integrity = service.get("manifest") or service_manager.runtime_integrity()
+    proxy_version = proxy.get("version") if proxy else ""
+    details = {
+        "service": service,
+        "manifest": integrity,
+        "bundle_version": integrity.get("bundle_version") or service.get("bundle_version") or expected_version,
+        "runtime_version": integrity.get("runtime_version") or service.get("runtime_version") or "",
+        "proxy_version": proxy_version,
+        "manifest_ok": bool(integrity.get("ok")),
+        "manifest_error": integrity.get("error", ""),
+        "token_usage_api_ok": False,
+        "token_usage_events_api_ok": False,
+    }
+    if not proxy:
+        return False, details, f"proxy did not report expected version {expected_version or '-'}"
+    if expected_version and proxy_version != expected_version:
+        return False, details, f"proxy_version_mismatch: expected {expected_version}, observed {proxy_version or '-'}"
+    if service.get("needs_repair") or service.get("migration_required") or service.get("version_mismatch"):
+        return False, details, f"launchagent_source_mismatch: {service.get('repair_reasons') or 'service needs repair'}"
+    expected_program = str(service_manager.RUNTIME_DIR / "proxy.py")
+    if service.get("installed_program") and Path(str(service.get("installed_program"))).expanduser().resolve() != Path(expected_program).resolve():
+        return False, details, f"launchagent_source_mismatch: {service.get('installed_program')}"
+    if not integrity.get("ok"):
+        return False, details, f"runtime_manifest_mismatch: {integrity.get('error') or integrity}"
+    token_usage = fetch_json_url("http://127.0.0.1:8800/api/token-usage", timeout=3)
+    token_events = fetch_json_url("http://127.0.0.1:8800/api/token-usage/events?limit=1", timeout=3)
+    details["token_usage_api_ok"] = isinstance(token_usage, dict) and token_usage.get("history_available") is True
+    details["token_usage_events_api_ok"] = isinstance(token_events, dict) and isinstance(token_events.get("events"), list)
+    if not details["token_usage_api_ok"]:
+        return False, details, "token_usage_api_missing"
+    if not details["token_usage_events_api_ok"]:
+        return False, details, "token_usage_events_api_missing"
+    return True, details, ""
+
+
 def apply_update() -> dict:
     lock = _acquire_update_lock()
     if not lock:
@@ -483,15 +537,13 @@ def apply_update() -> dict:
         if not service.get("restart_required"):
             restart_started = service_manager.restart()
         proxy = wait_for_proxy(expected_version=expected_version or None)
-        updated = bool(proxy and (not expected_version or proxy.get("version") == expected_version))
+        validation_ok, validation, validation_error = _post_update_validation(proxy, expected_version)
+        updated = validation_ok
         if updated:
             service_manager.cleanup_runtime_backup(backup_path)
             backup_path = None
         else:
-            observed = proxy.get("version") if proxy else None
-            error = f"proxy did not report expected version {expected_version or '-'}"
-            if observed:
-                error += f" (observed {observed})"
+            error = validation_error or f"proxy did not report expected version {expected_version or '-'}"
             if backup_path:
                 try:
                     service_manager.rollback_runtime(backup_path)
@@ -503,6 +555,7 @@ def apply_update() -> dict:
     finally:
         _release_update_lock(lock)
 
+    validation = locals().get("validation") or {}
     result = {
         "action": "apply_update",
         "installed": service.get("installed"),
@@ -512,6 +565,14 @@ def apply_update() -> dict:
         "active_accounts": proxy.get("active_accounts") if proxy else None,
         "total_accounts": proxy.get("total_accounts") if proxy else None,
         "version": proxy.get("version") if proxy else None,
+        "bundle_version": validation.get("bundle_version") or expected_version,
+        "runtime_version": validation.get("runtime_version") or service.get("runtime_version"),
+        "proxy_version": validation.get("proxy_version") or (proxy.get("version") if proxy else None),
+        "manifest_ok": bool(validation.get("manifest_ok")),
+        "manifest_error": validation.get("manifest_error", ""),
+        "token_usage_api_ok": bool(validation.get("token_usage_api_ok")),
+        "token_usage_events_api_ok": bool(validation.get("token_usage_events_api_ok")),
+        "frontend_restart_required": bool(updated and previous_version and previous_version != expected_version),
         "previous_version": previous_version,
         "expected_version": expected_version,
         "updated": updated,
@@ -547,6 +608,9 @@ def open_log() -> dict:
 def show_paths() -> dict:
     app_bundle = service_manager._app_bundle_dir()
     source_dir = service_manager._source_dir()
+    service = service_manager.status()
+    integrity = service.get("manifest") or service_manager.runtime_integrity(source=source_dir, runtime=service_manager.RUNTIME_DIR)
+    proxy = proxy_status(timeout=1)
     result = {
         "action": "show_paths",
         "source_app": str(app_bundle),
@@ -560,6 +624,13 @@ def show_paths() -> dict:
         "result_path": str(service_manager.RUNTIME_DIR / "control-result.txt"),
         "python": str(service_manager._python_executable()),
         "pythonpath": str(service_manager._pythonpath() or ""),
+        "bundle_version": integrity.get("bundle_version") or service.get("bundle_version", ""),
+        "runtime_version": integrity.get("runtime_version") or service.get("runtime_version", ""),
+        "proxy_version": proxy.get("version") if proxy else "",
+        "manifest_ok": integrity.get("ok", False),
+        "manifest_error": integrity.get("error", ""),
+        "manifest": integrity,
+        "installed_program": service.get("installed_program", ""),
         "dependencies": [
             "系统 Python 或 App/运行目录内置 Python",
             "aiohttp（系统安装或运行目录 vendor）",
@@ -904,6 +975,19 @@ def status() -> dict:
         "running": bool(proxy),
         "active_accounts": proxy.get("active_accounts") if proxy else None,
         "total_accounts": proxy.get("total_accounts") if proxy else None,
+        "version": proxy.get("version") if proxy else None,
+        "proxy_version": proxy.get("version") if proxy else None,
+        "expected_version": service.get("expected_version"),
+        "running_version": service.get("running_version"),
+        "bundle_version": service.get("bundle_version"),
+        "runtime_version": service.get("runtime_version"),
+        "manifest_ok": service.get("manifest_ok"),
+        "manifest_error": service.get("manifest_error"),
+        "manifest": service.get("manifest"),
+        "version_mismatch": service.get("version_mismatch"),
+        "migration_required": service.get("migration_required"),
+        "legacy_running": service.get("legacy_running"),
+        "installed_program": service.get("installed_program"),
         "source_dir": service.get("source_dir"),
         "runtime_dir": service.get("runtime_dir"),
     })

@@ -1,6 +1,7 @@
 import json
 import os
 import plistlib
+import sqlite3
 import sys
 import asyncio
 import tempfile
@@ -25,6 +26,7 @@ import proxy_core
 import quota_tracker
 import service_manager
 import usage_stats
+import runtime_manifest
 from account_manager import Account, AccountNameError, AccountPool, validate_account_name
 from config import ConfigError, validate
 from proxy_core import (
@@ -62,6 +64,7 @@ from proxy_core import (
     _websocket_target_url,
 )
 from usage_stats import (
+    compatible_cached_tokens,
     extract_usage_from_json,
     extract_usage_from_sse_bytes,
     record_request_usage,
@@ -315,6 +318,58 @@ class UsageStatsTests(unittest.TestCase):
         self.assertEqual(usage["output_tokens"], 8)
         self.assertEqual(usage["total_tokens"], 20)
 
+    def test_extract_usage_accepts_token_usage_aliases(self):
+        payload = {
+            "type": "response.completed",
+            "response": {
+                "token_usage": {
+                    "input": 12,
+                    "output": 8,
+                }
+            },
+        }
+
+        usage = extract_usage_from_json(payload)
+
+        self.assertEqual(usage["input_tokens"], 12)
+        self.assertEqual(usage["output_tokens"], 8)
+        self.assertEqual(usage["total_tokens"], 20)
+
+    def test_extract_usage_prefers_upstream_total_when_present(self):
+        payload = {
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "reasoning_tokens": 3,
+                "cache_read_tokens": 7,
+                "cache_creation_tokens": 11,
+                "total_tokens": 99,
+            }
+        }
+
+        usage = extract_usage_from_json(payload)
+
+        self.assertEqual(usage["total_tokens"], 99)
+        self.assertEqual(usage["cache_read_tokens"], 7)
+        self.assertEqual(usage["cache_creation_tokens"], 11)
+
+    def test_extract_usage_computes_total_without_double_counting_cache(self):
+        payload = {
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "reasoning_tokens": 3,
+                "cached_tokens": 100,
+                "cache_read_tokens": 7,
+                "cache_creation_tokens": 11,
+            }
+        }
+
+        usage = extract_usage_from_json(payload)
+
+        self.assertEqual(compatible_cached_tokens(usage), 0)
+        self.assertEqual(usage["total_tokens"], 36)
+
     def test_extract_usage_from_sse_uses_largest_total(self):
         body = (
             b"data: {\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}\n\n"
@@ -327,7 +382,9 @@ class UsageStatsTests(unittest.TestCase):
 
     def test_record_request_usage_summarizes_daily_weekly_and_dedupes(self):
         stats_file = Path(tempfile.mkdtemp()) / "usage_stats.json"
-        with mock.patch.object(usage_stats, "USAGE_STATS_FILE", stats_file):
+        history_db = Path(tempfile.mkdtemp()) / "usage_history.sqlite"
+        with mock.patch.object(usage_stats, "USAGE_STATS_FILE", stats_file), \
+             mock.patch.object(usage_stats, "USAGE_HISTORY_DB", history_db):
             record_request_usage(
                 request_id="req-1",
                 account="a",
@@ -353,11 +410,100 @@ class UsageStatsTests(unittest.TestCase):
         self.assertEqual(summary["total"]["total_tokens"], 15)
         self.assertEqual(summary["total"]["requests"], 2)
         self.assertEqual(summary["total"]["unknown_requests"], 1)
+        self.assertEqual(summary["storage"], "sqlite")
+        self.assertTrue(summary["history_available"])
+        self.assertEqual(summary["counting_policy"], "proxy_captured_usage")
         self.assertTrue(any(day["total_tokens"] == 15 for day in summary["daily"]))
+
+    def test_record_request_usage_updates_unknown_duplicate_with_known_usage(self):
+        stats_file = Path(tempfile.mkdtemp()) / "usage_stats.json"
+        history_db = Path(tempfile.mkdtemp()) / "usage_history.sqlite"
+        with mock.patch.object(usage_stats, "USAGE_STATS_FILE", stats_file), \
+             mock.patch.object(usage_stats, "USAGE_HISTORY_DB", history_db):
+            record_request_usage(
+                request_id="req-upgrade",
+                account="a",
+                path="/v1/responses",
+                usage=None,
+                model="gpt-5.3-codex",
+                status=200,
+            )
+            record_request_usage(
+                request_id="req-upgrade",
+                account="a",
+                path="/v1/responses",
+                usage={"input_tokens": 4, "output_tokens": 6, "total_tokens": 10},
+                model="gpt-5.3-codex",
+                status=200,
+            )
+            summary = usage_stats.summary()
+            rows = usage_stats.events(limit=10)["events"]
+
+        self.assertEqual(summary["total"]["requests"], 1)
+        self.assertEqual(summary["total"]["unknown_requests"], 0)
+        self.assertEqual(summary["total"]["total_tokens"], 10)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["known"])
+        self.assertEqual(rows[0]["model"], "gpt-5.3-codex")
+
+    def test_legacy_usage_json_imports_idempotently(self):
+        root = Path(tempfile.mkdtemp())
+        stats_file = root / "usage_stats.json"
+        history_db = root / "usage_history.sqlite"
+        stats_file.write_text(json.dumps({
+            "requests": {
+                "legacy-1": {
+                    "known": True,
+                    "account": "a",
+                    "path": "/backend-api/codex/responses",
+                    "at": time.time(),
+                    "input_tokens": 3,
+                    "output_tokens": 7,
+                    "total_tokens": 10,
+                }
+            }
+        }))
+        with mock.patch.object(usage_stats, "USAGE_STATS_FILE", stats_file), \
+             mock.patch.object(usage_stats, "USAGE_HISTORY_DB", history_db):
+            first = usage_stats.summary()
+            second = usage_stats.summary()
+            rows = usage_stats.events(limit=10)["events"]
+
+        self.assertEqual(first["total"]["total_tokens"], 10)
+        self.assertEqual(second["total"]["total_tokens"], 10)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "legacy_json")
+
+    def test_usage_events_filters_by_account_model_and_limit(self):
+        history_db = Path(tempfile.mkdtemp()) / "usage_history.sqlite"
+        stats_file = Path(tempfile.mkdtemp()) / "usage_stats.json"
+        with mock.patch.object(usage_stats, "USAGE_STATS_FILE", stats_file), \
+             mock.patch.object(usage_stats, "USAGE_HISTORY_DB", history_db):
+            record_request_usage(
+                request_id="req-a",
+                account="a",
+                path="/v1/responses",
+                usage={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                model="gpt-a",
+            )
+            record_request_usage(
+                request_id="req-b",
+                account="b",
+                path="/v1/responses",
+                usage={"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                model="gpt-b",
+            )
+            rows = usage_stats.events(limit=1, account="b", model="gpt-b")["events"]
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["request_id"], "req-b")
+        self.assertEqual(rows[0]["total_tokens"], 5)
 
     def test_token_usage_api_returns_summary(self):
         stats_file = Path(tempfile.mkdtemp()) / "usage_stats.json"
-        with mock.patch.object(usage_stats, "USAGE_STATS_FILE", stats_file):
+        history_db = Path(tempfile.mkdtemp()) / "usage_history.sqlite"
+        with mock.patch.object(usage_stats, "USAGE_STATS_FILE", stats_file), \
+             mock.patch.object(usage_stats, "USAGE_HISTORY_DB", history_db):
             record_request_usage(
                 request_id="req-api",
                 account="a",
@@ -370,6 +516,110 @@ class UsageStatsTests(unittest.TestCase):
         self.assertEqual(data["total"]["total_tokens"], 5)
         self.assertEqual(len(data["daily"]), 31)
         self.assertEqual(len(data["weekly"]), 53)
+        self.assertEqual(data["storage"], "sqlite")
+
+    def test_token_usage_api_accepts_daily_days(self):
+        stats_file = Path(tempfile.mkdtemp()) / "usage_stats.json"
+        history_db = Path(tempfile.mkdtemp()) / "usage_history.sqlite"
+        request = mock.Mock()
+        request.query = {"daily_days": "371"}
+        with mock.patch.object(usage_stats, "USAGE_STATS_FILE", stats_file), \
+             mock.patch.object(usage_stats, "USAGE_HISTORY_DB", history_db):
+            record_request_usage(
+                request_id="req-heatmap",
+                account="a",
+                path="/v1/responses",
+                usage={"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+            )
+            response = asyncio.run(proxy.api_token_usage(request))
+            data = json.loads(response.text)
+
+        self.assertEqual(len(data["daily"]), 371)
+        self.assertEqual(data["total"]["total_tokens"], 5)
+
+    def test_token_usage_api_clamps_daily_days(self):
+        stats_file = Path(tempfile.mkdtemp()) / "usage_stats.json"
+        history_db = Path(tempfile.mkdtemp()) / "usage_history.sqlite"
+        high_request = mock.Mock()
+        high_request.query = {"daily_days": "999"}
+        low_request = mock.Mock()
+        low_request.query = {"daily_days": "0"}
+        with mock.patch.object(usage_stats, "USAGE_STATS_FILE", stats_file), \
+             mock.patch.object(usage_stats, "USAGE_HISTORY_DB", history_db):
+            high = json.loads(asyncio.run(proxy.api_token_usage(high_request)).text)
+            low = json.loads(asyncio.run(proxy.api_token_usage(low_request)).text)
+
+        self.assertEqual(len(high["daily"]), 371)
+        self.assertEqual(len(low["daily"]), 1)
+
+    def test_token_usage_events_api_returns_recent_events(self):
+        history_db = Path(tempfile.mkdtemp()) / "usage_history.sqlite"
+        stats_file = Path(tempfile.mkdtemp()) / "usage_stats.json"
+        request = mock.Mock()
+        request.query = {"limit": "5", "account": "a"}
+        with mock.patch.object(usage_stats, "USAGE_STATS_FILE", stats_file), \
+             mock.patch.object(usage_stats, "USAGE_HISTORY_DB", history_db):
+            record_request_usage(
+                request_id="req-events",
+                account="a",
+                path="/v1/responses",
+                usage={"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                method="POST",
+                model="gpt-5.3-codex",
+                status=200,
+            )
+            response = asyncio.run(proxy.api_token_usage_events(request))
+            data = json.loads(response.text)
+
+        self.assertEqual(data["events"][0]["request_id"], "req-events")
+        self.assertEqual(data["events"][0]["method"], "POST")
+        self.assertEqual(data["events"][0]["model"], "gpt-5.3-codex")
+        self.assertEqual(data["counting_policy"], "proxy_captured_usage")
+
+    def test_usage_sqlite_schema_migrates_cache_columns(self):
+        history_db = Path(tempfile.mkdtemp()) / "usage_history.sqlite"
+        stats_file = Path(tempfile.mkdtemp()) / "usage_stats.json"
+        conn = sqlite3.connect(history_db)
+        conn.execute("""
+            CREATE TABLE usage_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_hash TEXT NOT NULL UNIQUE,
+                request_id TEXT,
+                at REAL NOT NULL,
+                day TEXT NOT NULL,
+                week TEXT NOT NULL,
+                account TEXT NOT NULL,
+                path TEXT NOT NULL,
+                method TEXT,
+                model TEXT,
+                status INTEGER,
+                failed INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                cached_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                known INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'proxy',
+                created_at REAL NOT NULL
+            )
+        """)
+        conn.execute("CREATE TABLE usage_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.commit()
+        conn.close()
+
+        with mock.patch.object(usage_stats, "USAGE_STATS_FILE", stats_file), \
+             mock.patch.object(usage_stats, "USAGE_HISTORY_DB", history_db):
+            record_request_usage(
+                request_id="req-cache",
+                account="a",
+                path="/v1/responses",
+                usage={"input_tokens": 1, "output_tokens": 2, "cache_read_tokens": 3},
+            )
+            row = usage_stats.events(limit=1)["events"][0]
+
+        self.assertEqual(row["cache_read_tokens"], 3)
+        self.assertEqual(row["total_tokens"], 6)
 
 
 class ControlActionsTests(unittest.TestCase):
@@ -607,6 +857,101 @@ class ControlActionsTests(unittest.TestCase):
         self.assertIn("expected version 0.5.4", result["error"])
         rollback.assert_called_once_with(str(backup))
 
+    def test_apply_update_reports_manifest_validated_success(self):
+        lock = Path(tempfile.mkdtemp()) / "lock"
+        lock.mkdir()
+        service = {
+            "installed": True,
+            "loaded": True,
+            "needs_repair": False,
+            "version_mismatch": False,
+            "migration_required": False,
+            "restart_required": False,
+            "source_dir": "/source",
+            "runtime_dir": "/runtime",
+            "sync": {"backup_path": None},
+        }
+        service_after = {
+            **service,
+            "installed_program": str(service_manager.RUNTIME_DIR / "proxy.py"),
+            "manifest": {
+                "ok": True,
+                "bundle_version": "0.6.1",
+                "runtime_version": "0.6.1",
+            },
+        }
+        with mock.patch("control_actions._acquire_update_lock", return_value=lock), \
+                mock.patch("control_actions.proxy_status", return_value={"version": "0.6.0"}), \
+                mock.patch("control_actions.source_app_version", return_value="0.6.1"), \
+                mock.patch("control_actions.service_manager.install", return_value=service), \
+                mock.patch("control_actions.service_manager.restart", return_value=True), \
+                mock.patch("control_actions.wait_for_proxy", return_value={
+                    "running": True,
+                    "version": "0.6.1",
+                    "active_accounts": 1,
+                    "total_accounts": 1,
+                }), \
+                mock.patch("control_actions.fetch_json_url", side_effect=[
+                    {"history_available": True},
+                    {"events": []},
+                ]), \
+                mock.patch("control_actions.service_manager.status", return_value=service_after), \
+                mock.patch("control_actions.service_manager.cleanup_runtime_backup") as cleanup:
+            result = control_actions.apply_update()
+
+        self.assertTrue(result["updated"])
+        self.assertTrue(result["manifest_ok"])
+        self.assertTrue(result["frontend_restart_required"])
+        self.assertEqual(result["bundle_version"], "0.6.1")
+        self.assertEqual(result["runtime_version"], "0.6.1")
+        self.assertEqual(result["proxy_version"], "0.6.1")
+        cleanup.assert_called_once_with(None)
+
+    def test_apply_update_rolls_back_when_manifest_mismatch(self):
+        backup = Path(tempfile.mkdtemp()) / "backup"
+        backup.mkdir()
+        lock = Path(tempfile.mkdtemp()) / "lock"
+        lock.mkdir()
+        service = {
+            "installed": True,
+            "loaded": True,
+            "needs_repair": False,
+            "version_mismatch": False,
+            "migration_required": False,
+            "restart_required": False,
+            "source_dir": "/source",
+            "runtime_dir": "/runtime",
+            "sync": {"backup_path": str(backup)},
+        }
+        service_after = {
+            **service,
+            "installed_program": str(service_manager.RUNTIME_DIR / "proxy.py"),
+            "manifest": {
+                "ok": False,
+                "bundle_version": "0.6.1",
+                "runtime_version": "0.6.0",
+                "changed": ["proxy.py"],
+            },
+        }
+        with mock.patch("control_actions._acquire_update_lock", return_value=lock), \
+                mock.patch("control_actions.proxy_status", return_value={"version": "0.6.0"}), \
+                mock.patch("control_actions.source_app_version", return_value="0.6.1"), \
+                mock.patch("control_actions.service_manager.install", return_value=service), \
+                mock.patch("control_actions.service_manager.restart", return_value=True), \
+                mock.patch("control_actions.wait_for_proxy", return_value={
+                    "running": True,
+                    "version": "0.6.1",
+                }), \
+                mock.patch("control_actions.service_manager.status", return_value=service_after), \
+                mock.patch("control_actions.service_manager.rollback_runtime", return_value={"rolled_back": True}) as rollback:
+            result = control_actions.apply_update()
+
+        self.assertFalse(result["updated"])
+        self.assertFalse(result["manifest_ok"])
+        self.assertTrue(result["rolled_back"])
+        self.assertIn("runtime_manifest_mismatch", result["error"])
+        rollback.assert_called_once_with(str(backup))
+
     def test_render_output_json_keeps_machine_readable_keys(self):
         payload = {
             "action": "status",
@@ -632,8 +977,9 @@ class ControlActionsTests(unittest.TestCase):
 
 class ServiceManagerRuntimeTests(unittest.TestCase):
     def _write_minimal_runtime_source(self, source: Path) -> None:
-        for name in ("account_manager.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py"):
+        for name in ("account_manager.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py", "version.py", "runtime_manifest.py"):
             (source / name).write_text(f"# {name}\n")
+        (source / "VERSION").write_text("0.6.1\n")
         (source / "static").mkdir(exist_ok=True)
         (source / "static" / "index.html").write_text("static\n")
 
@@ -659,8 +1005,9 @@ class ServiceManagerRuntimeTests(unittest.TestCase):
             (source / "static").mkdir()
             (source / "proxy.py").write_text("# new proxy\n")
             (source / "config.json").write_text('{"port": 8801}\n')
-            for name in ("account_manager.py", "config.py", "proxy_core.py", "service_manager.py"):
+            for name in ("account_manager.py", "config.py", "proxy_core.py", "service_manager.py", "version.py", "runtime_manifest.py"):
                 (source / name).write_text(f"# new {name}\n")
+            (source / "VERSION").write_text("0.6.1\n")
             (source / "python" / "bin" / "python3").write_text("new-python\n")
             (source / "vendor" / "pkg.txt").write_text("new-vendor\n")
             (source / "static" / "index.html").write_text("new-static\n")
@@ -706,9 +1053,11 @@ class ServiceManagerRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as runtime_tmp:
             source = Path(source_tmp)
             runtime = Path(runtime_tmp)
-            for name in ("account_manager.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py"):
+            for name in ("account_manager.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py", "version.py", "runtime_manifest.py"):
                 (source / name).write_text(f"# new {name}\n")
                 (runtime / name).write_text(f"# old {name}\n")
+            (source / "VERSION").write_text("0.6.1\n")
+            (runtime / "VERSION").write_text("0.6.0\n")
             (source / "config.json").write_text('{"port": 9999}\n')
             (runtime / "config.json").write_text('{"port": 8800}\n')
             for dirname in ("python", "static", "vendor"):
@@ -739,6 +1088,59 @@ class ServiceManagerRuntimeTests(unittest.TestCase):
             self.assertEqual((runtime / "vendor" / "marker.txt").read_text(), "old-vendor\n")
             self.assertEqual((runtime / "config.json").read_text(), '{"port": 8800}\n')
             self.assertEqual((runtime / "accounts" / "a" / "auth.json").read_text(), "{}\n")
+
+
+class RuntimeManifestTests(unittest.TestCase):
+    def _write_manifest_root(self, root: Path, version: str = "0.6.1") -> None:
+        (root / "VERSION").write_text(version + "\n")
+        for name in (
+            "account_manager.py",
+            "config.py",
+            "proxy.py",
+            "proxy_core.py",
+            "quota_tracker.py",
+            "service_manager.py",
+            "usage_stats.py",
+            "version.py",
+            "runtime_manifest.py",
+        ):
+            (root / name).write_text(f"# {name}\n")
+        (root / "static").mkdir(exist_ok=True)
+        (root / "static" / "index.html").write_text("static\n")
+
+    def test_manifest_round_trip_and_compare(self):
+        root = Path(tempfile.mkdtemp())
+        self._write_manifest_root(root)
+        build = runtime_manifest.write_manifest(root, manifest_name=runtime_manifest.BUILD_MANIFEST)
+        observed = runtime_manifest.generate_manifest(root, manifest_name=runtime_manifest.RUNTIME_MANIFEST)
+
+        self.assertEqual(build["version"], "0.6.1")
+        self.assertTrue(runtime_manifest.compare_manifests(build, observed)["ok"])
+
+    def test_manifest_compare_reports_changed_hash(self):
+        root = Path(tempfile.mkdtemp())
+        self._write_manifest_root(root)
+        build = runtime_manifest.generate_manifest(root)
+        (root / "proxy.py").write_text("# changed\n")
+        observed = runtime_manifest.generate_manifest(root, manifest_name=runtime_manifest.RUNTIME_MANIFEST)
+        result = runtime_manifest.compare_manifests(build, observed)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("proxy.py", result["changed"])
+
+    def test_sync_runtime_writes_runtime_manifest(self):
+        source = Path(tempfile.mkdtemp())
+        runtime = Path(tempfile.mkdtemp())
+        self._write_manifest_root(source)
+        runtime_manifest.write_manifest(source, manifest_name=runtime_manifest.BUILD_MANIFEST)
+
+        with mock.patch.dict(os.environ, {service_manager.SOURCE_DIR_ENV: str(source)}), \
+                mock.patch.object(service_manager, "RUNTIME_DIR", runtime):
+            service_manager._sync_runtime_dir()
+
+        self.assertTrue((runtime / runtime_manifest.RUNTIME_MANIFEST).exists())
+        check = runtime_manifest.compare_runtime_to_bundle(source, runtime)
+        self.assertTrue(check["ok"])
 
 
 class TrashTests(unittest.TestCase):
@@ -2144,8 +2546,9 @@ class CodexConfigTests(unittest.TestCase):
 
 class ServiceManagerTests(unittest.TestCase):
     def _write_minimal_runtime_source(self, source: Path) -> None:
-        for name in ("account_manager.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py"):
+        for name in ("account_manager.py", "config.py", "proxy.py", "proxy_core.py", "service_manager.py", "version.py", "runtime_manifest.py"):
             (source / name).write_text(f"# {name}\n")
+        (source / "VERSION").write_text("0.6.1\n")
         (source / "static").mkdir(exist_ok=True)
         (source / "static" / "index.html").write_text("static\n")
 

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import hashlib
 import json
 import logging
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -12,21 +14,34 @@ from typing import Any, Optional
 from config import CONFIG_DIR
 
 USAGE_STATS_FILE = CONFIG_DIR / "usage_stats.json"
+USAGE_HISTORY_DB = CONFIG_DIR / "usage_history.sqlite"
 DAILY_DAYS = 31
+MAX_DAILY_DAYS = 371
 WEEKLY_WEEKS = 53
 RETENTION_DAYS = 371
+COUNTING_POLICY = "proxy_captured_usage"
+COUNTING_POLICY_DETAIL = (
+    "Local proxy-captured usage from upstream response payloads. "
+    "Requests that did not expose usage are counted as unknown and do not add tokens."
+)
+COUNTER_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "cached_tokens",
+    "cache_tokens",
+    "cache_read_tokens",
+    "cache_creation_tokens",
+    "total_tokens",
+    "requests",
+    "unknown_requests",
+)
 
 logger = logging.getLogger(__name__)
 
 
 def _empty_counter() -> dict:
-    return {
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
-        "requests": 0,
-        "unknown_requests": 0,
-    }
+    return {key: 0 for key in COUNTER_KEYS}
 
 
 def _number(value: Any) -> Optional[int]:
@@ -37,34 +52,141 @@ def _number(value: Any) -> Optional[int]:
     return None
 
 
-def _usage_from_dict(data: dict) -> Optional[dict]:
-    input_tokens = _number(data.get("input_tokens"))
-    if input_tokens is None:
-        input_tokens = _number(data.get("prompt_tokens"))
-    output_tokens = _number(data.get("output_tokens"))
-    if output_tokens is None:
-        output_tokens = _number(data.get("completion_tokens"))
-    total_tokens = _number(data.get("total_tokens"))
+INPUT_TOKEN_KEYS = (
+    "input_tokens",
+    "prompt_tokens",
+    "input_token_count",
+    "prompt_token_count",
+    "input_text_tokens",
+)
+OUTPUT_TOKEN_KEYS = (
+    "output_tokens",
+    "completion_tokens",
+    "output_token_count",
+    "completion_token_count",
+    "output_text_tokens",
+)
+TOTAL_TOKEN_KEYS = (
+    "total_tokens",
+    "total_token_count",
+    "tokens_total",
+    "totalTokens",
+)
+REASONING_TOKEN_KEYS = (
+    "reasoning_tokens",
+    "reasoningTokens",
+)
+CACHED_TOKEN_KEYS = (
+    "cached_tokens",
+    "cachedTokens",
+)
+CACHE_TOKEN_KEYS = (
+    "cache_tokens",
+    "cacheTokens",
+)
+CACHE_READ_TOKEN_KEYS = (
+    "cache_read_tokens",
+    "cacheReadTokens",
+)
+CACHE_CREATION_TOKEN_KEYS = (
+    "cache_creation_tokens",
+    "cacheCreationTokens",
+)
+USAGE_CONTAINER_KEYS = (
+    "usage",
+    "tokens",
+    "token_usage",
+    "tokenUsage",
+    "token_counts",
+    "tokenCounts",
+)
 
-    if total_tokens is None and (input_tokens is not None or output_tokens is not None):
-        total_tokens = (input_tokens or 0) + (output_tokens or 0)
-    if total_tokens is None:
-        return None
-    return {
+
+def _first_number(data: dict, keys: tuple[str, ...]) -> Optional[int]:
+    for key in keys:
+        number = _number(data.get(key))
+        if number is not None:
+            return number
+    return None
+
+
+def _first_string(data: dict, keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def compatible_cached_tokens(usage: Optional[dict]) -> int:
+    if not usage:
+        return 0
+    cache_tokens = int(usage.get("cache_tokens") or usage.get("cached_tokens") or 0)
+    cache_read_tokens = int(usage.get("cache_read_tokens") or 0)
+    cache_creation_tokens = int(usage.get("cache_creation_tokens") or 0)
+    return 0 if (cache_read_tokens or cache_creation_tokens) else cache_tokens
+
+
+def _usage_from_dict(data: dict, *, usage_container: bool = False) -> Optional[dict]:
+    input_keys = INPUT_TOKEN_KEYS + (("input", "prompt") if usage_container else ())
+    output_keys = OUTPUT_TOKEN_KEYS + (("output", "completion") if usage_container else ())
+    total_keys = TOTAL_TOKEN_KEYS + (("total",) if usage_container else ())
+
+    input_tokens = _first_number(data, input_keys)
+    output_tokens = _first_number(data, output_keys)
+    reasoning_tokens = _first_number(data, REASONING_TOKEN_KEYS)
+    cached_tokens = _first_number(data, CACHED_TOKEN_KEYS)
+    cache_tokens = _first_number(data, CACHE_TOKEN_KEYS)
+    cache_read_tokens = _first_number(data, CACHE_READ_TOKEN_KEYS)
+    cache_creation_tokens = _first_number(data, CACHE_CREATION_TOKEN_KEYS)
+    total_tokens = _first_number(data, total_keys)
+    usage = {
         "input_tokens": input_tokens or 0,
         "output_tokens": output_tokens or 0,
-        "total_tokens": total_tokens,
+        "reasoning_tokens": reasoning_tokens or 0,
+        "cached_tokens": cached_tokens or 0,
+        "cache_tokens": cache_tokens if cache_tokens is not None else (cached_tokens or 0),
+        "cache_read_tokens": cache_read_tokens or 0,
+        "cache_creation_tokens": cache_creation_tokens or 0,
+        "requested_model": _first_string(data, ("requested_model", "requestedModel")),
+        "resolved_model": _first_string(data, ("resolved_model", "resolvedModel", "model")),
+        "reasoning_effort": _first_string(data, ("reasoning_effort", "reasoningEffort")),
+        "service_tier": _first_string(data, ("service_tier", "serviceTier")),
+        "executor_type": _first_string(data, ("executor_type", "executorType")),
     }
+
+    if total_tokens is None and (
+        input_tokens is not None
+        or output_tokens is not None
+        or reasoning_tokens is not None
+        or cached_tokens is not None
+        or cache_tokens is not None
+        or cache_read_tokens is not None
+        or cache_creation_tokens is not None
+    ):
+        total_tokens = (
+            usage["input_tokens"]
+            + usage["output_tokens"]
+            + usage["reasoning_tokens"]
+            + compatible_cached_tokens(usage)
+            + usage["cache_read_tokens"]
+            + usage["cache_creation_tokens"]
+        )
+    if total_tokens is None:
+        return None
+    usage["total_tokens"] = total_tokens
+    return usage
 
 
 def _find_usage_values(value: Any) -> list[dict]:
     found = []
     if isinstance(value, dict):
-        usage = value.get("usage")
-        if isinstance(usage, dict):
-            parsed = _usage_from_dict(usage)
-            if parsed:
-                found.append(parsed)
+        for key in USAGE_CONTAINER_KEYS:
+            usage = value.get(key)
+            if isinstance(usage, dict):
+                parsed = _usage_from_dict(usage, usage_container=True)
+                if parsed:
+                    found.append(parsed)
         parsed = _usage_from_dict(value)
         if parsed:
             found.append(parsed)
@@ -175,7 +297,7 @@ class UsageCollector:
             self.usage = usage
 
 
-def _load() -> dict:
+def _load_legacy_json() -> dict:
     if not USAGE_STATS_FILE.exists():
         return {"requests": {}}
     try:
@@ -185,18 +307,6 @@ def _load() -> dict:
     except Exception as e:
         logger.warning("failed to load token usage stats: %s", e)
         return {"requests": {}}
-
-
-def _save(data: dict) -> None:
-    try:
-        USAGE_STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = USAGE_STATS_FILE.with_suffix(".json.tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, sort_keys=True)
-            f.write("\n")
-        tmp_path.replace(USAGE_STATS_FILE)
-    except OSError as e:
-        logger.warning("failed to save token usage stats: %s", e)
 
 
 def _day_key(epoch: float) -> str:
@@ -215,12 +325,299 @@ def _request_key(request_id: str, account: str, path: str, epoch: float) -> str:
     return f"{account}:{path}:{int(epoch * 1000)}"
 
 
-def _prune(data: dict, now: float) -> None:
+def _event_hash(*parts: Any) -> str:
+    text = "|".join(str(part or "") for part in parts)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _connect() -> sqlite3.Connection:
+    USAGE_HISTORY_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(USAGE_HISTORY_DB)
+    conn.row_factory = sqlite3.Row
+    _ensure_db(conn)
+    _import_legacy_json_once(conn)
+    return conn
+
+
+def _ensure_db(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS usage_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_hash TEXT NOT NULL UNIQUE,
+            request_id TEXT,
+            at REAL NOT NULL,
+            day TEXT NOT NULL,
+            week TEXT NOT NULL,
+            account TEXT NOT NULL,
+            path TEXT NOT NULL,
+            method TEXT,
+            model TEXT,
+            status INTEGER,
+            failed INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+            cached_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            known INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'proxy',
+            latency_ms REAL,
+            ttft_ms REAL,
+            requested_model TEXT,
+            resolved_model TEXT,
+            reasoning_effort TEXT,
+            service_tier TEXT,
+            executor_type TEXT,
+            created_at REAL NOT NULL
+        )
+    """)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(usage_events)").fetchall()}
+    migrations = {
+        "cache_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "cache_read_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "cache_creation_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "latency_ms": "REAL",
+        "ttft_ms": "REAL",
+        "requested_model": "TEXT",
+        "resolved_model": "TEXT",
+        "reasoning_effort": "TEXT",
+        "service_tier": "TEXT",
+        "executor_type": "TEXT",
+    }
+    for name, ddl in migrations.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE usage_events ADD COLUMN {name} {ddl}")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS usage_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_events_at ON usage_events(at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_events_day ON usage_events(day)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_events_week ON usage_events(week)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_events_account ON usage_events(account)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_events_model ON usage_events(model)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_events_request_id ON usage_events(request_id)")
+    conn.commit()
+
+
+def _import_legacy_json_once(conn: sqlite3.Connection) -> None:
+    if not USAGE_STATS_FILE.exists():
+        return
+    key = f"legacy_json_imported:{USAGE_STATS_FILE.resolve()}"
+    imported = conn.execute("SELECT value FROM usage_meta WHERE key = ?", (key,)).fetchone()
+    if imported:
+        return
+    data = _load_legacy_json()
+    requests = data.get("requests") if isinstance(data, dict) else {}
+    if not isinstance(requests, dict):
+        requests = {}
+    now = time.time()
+    for legacy_key, row in requests.items():
+        if not isinstance(row, dict):
+            continue
+        at = float(row.get("at") or now)
+        usage = {
+            "input_tokens": int(row.get("input_tokens") or 0),
+            "output_tokens": int(row.get("output_tokens") or 0),
+            "reasoning_tokens": int(row.get("reasoning_tokens") or 0),
+            "cached_tokens": int(row.get("cached_tokens") or 0),
+            "cache_tokens": int(row.get("cache_tokens") or row.get("cached_tokens") or 0),
+            "cache_read_tokens": int(row.get("cache_read_tokens") or 0),
+            "cache_creation_tokens": int(row.get("cache_creation_tokens") or 0),
+            "total_tokens": int(row.get("total_tokens") or 0),
+        }
+        if not usage["total_tokens"] and any(usage.values()):
+            usage["total_tokens"] = (
+                usage["input_tokens"]
+                + usage["output_tokens"]
+                + usage["reasoning_tokens"]
+                + compatible_cached_tokens(usage)
+                + usage["cache_read_tokens"]
+                + usage["cache_creation_tokens"]
+            )
+        _insert_or_update_event(
+            conn,
+            request_id=str(legacy_key) if legacy_key else "",
+            account=str(row.get("account") or ""),
+            path=str(row.get("path") or ""),
+            usage=usage if bool(row.get("known")) else None,
+            at=at,
+            method=str(row.get("method") or ""),
+            model=str(row.get("model") or ""),
+            status=_optional_int(row.get("status")),
+            failed=bool(row.get("failed") or False),
+            source="legacy_json",
+            event_hash=_event_hash("legacy_json", legacy_key),
+        )
+    conn.execute(
+        "INSERT OR REPLACE INTO usage_meta(key, value) VALUES (?, ?)",
+        (key, str(now)),
+    )
+    conn.commit()
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _prune(conn: sqlite3.Connection, now: float) -> None:
     cutoff = now - (RETENTION_DAYS * 86400)
-    requests = data.setdefault("requests", {})
-    for key in list(requests.keys()):
-        if float(requests.get(key, {}).get("at") or 0) < cutoff:
-            requests.pop(key, None)
+    conn.execute("DELETE FROM usage_events WHERE at < ?", (cutoff,))
+
+
+def _counter_from_usage(usage: Optional[dict]) -> dict:
+    counter = _empty_counter()
+    if usage:
+        for key in ("input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens", "cache_tokens", "cache_read_tokens", "cache_creation_tokens", "total_tokens"):
+            counter[key] = int(usage.get(key) or 0)
+        if not counter["cache_tokens"] and counter["cached_tokens"]:
+            counter["cache_tokens"] = counter["cached_tokens"]
+        counter["requests"] = 1
+        if not counter["total_tokens"]:
+            counter["total_tokens"] = (
+                counter["input_tokens"]
+                + counter["output_tokens"]
+                + counter["reasoning_tokens"]
+                + compatible_cached_tokens(counter)
+                + counter["cache_read_tokens"]
+                + counter["cache_creation_tokens"]
+            )
+    else:
+        counter["requests"] = 1
+        counter["unknown_requests"] = 1
+    return counter
+
+
+def _insert_or_update_event(
+    conn: sqlite3.Connection,
+    *,
+    request_id: str,
+    account: str,
+    path: str,
+    usage: Optional[dict],
+    at: float,
+    method: str = "",
+    model: str = "",
+    status: Optional[int] = None,
+    failed: bool = False,
+    source: str = "proxy",
+    event_hash: str = "",
+    latency_ms: Optional[float] = None,
+    ttft_ms: Optional[float] = None,
+    requested_model: str = "",
+    resolved_model: str = "",
+    reasoning_effort: str = "",
+    service_tier: str = "",
+    executor_type: str = "",
+) -> None:
+    if not path or "codex" not in path and not path.startswith("/v1/responses"):
+        return
+    key = _request_key(request_id, account, path, at)
+    event_hash = event_hash or _event_hash("usage", key, account, path)
+    known = bool(usage)
+    counter = _counter_from_usage(usage)
+    existing = None
+    if request_id:
+        existing = conn.execute(
+            "SELECT id, known FROM usage_events WHERE request_id = ? ORDER BY id DESC LIMIT 1",
+            (request_id,),
+        ).fetchone()
+    if existing is None:
+        existing = conn.execute(
+            "SELECT id, known FROM usage_events WHERE event_hash = ?",
+            (event_hash,),
+        ).fetchone()
+    if existing and (int(existing["known"]) or not known):
+        return
+    values = {
+        "event_hash": event_hash,
+        "request_id": request_id,
+        "at": at,
+        "day": _day_key(at),
+        "week": _week_key(at),
+        "account": account,
+        "path": path,
+        "method": method,
+        "model": model,
+        "status": status,
+        "failed": 1 if failed or (status is not None and status >= 400) else 0,
+        "input_tokens": counter["input_tokens"],
+        "output_tokens": counter["output_tokens"],
+        "reasoning_tokens": counter["reasoning_tokens"],
+        "cached_tokens": counter["cached_tokens"],
+        "cache_tokens": counter["cache_tokens"],
+        "cache_read_tokens": counter["cache_read_tokens"],
+        "cache_creation_tokens": counter["cache_creation_tokens"],
+        "total_tokens": counter["total_tokens"],
+        "known": 1 if known else 0,
+        "source": source,
+        "latency_ms": latency_ms,
+        "ttft_ms": ttft_ms,
+        "requested_model": requested_model or str(usage.get("requested_model") or "") if usage else requested_model,
+        "resolved_model": resolved_model or str(usage.get("resolved_model") or "") if usage else resolved_model,
+        "reasoning_effort": reasoning_effort or str(usage.get("reasoning_effort") or "") if usage else reasoning_effort,
+        "service_tier": service_tier or str(usage.get("service_tier") or "") if usage else service_tier,
+        "executor_type": executor_type or str(usage.get("executor_type") or "") if usage else executor_type,
+        "created_at": time.time(),
+    }
+    if existing:
+        conn.execute("""
+            UPDATE usage_events
+            SET event_hash = :event_hash,
+                at = :at,
+                day = :day,
+                week = :week,
+                account = :account,
+                path = :path,
+                method = :method,
+                model = :model,
+                status = :status,
+                failed = :failed,
+                input_tokens = :input_tokens,
+                output_tokens = :output_tokens,
+                reasoning_tokens = :reasoning_tokens,
+                cached_tokens = :cached_tokens,
+                cache_tokens = :cache_tokens,
+                cache_read_tokens = :cache_read_tokens,
+                cache_creation_tokens = :cache_creation_tokens,
+                total_tokens = :total_tokens,
+                known = :known,
+                source = :source,
+                latency_ms = :latency_ms,
+                ttft_ms = :ttft_ms,
+                requested_model = :requested_model,
+                resolved_model = :resolved_model,
+                reasoning_effort = :reasoning_effort,
+                service_tier = :service_tier,
+                executor_type = :executor_type
+            WHERE id = :id
+        """, {**values, "id": existing["id"]})
+        return
+    conn.execute("""
+        INSERT OR IGNORE INTO usage_events (
+            event_hash, request_id, at, day, week, account, path, method, model,
+            status, failed, input_tokens, output_tokens, reasoning_tokens,
+            cached_tokens, cache_tokens, cache_read_tokens, cache_creation_tokens,
+            total_tokens, known, source, latency_ms, ttft_ms, requested_model,
+            resolved_model, reasoning_effort, service_tier, executor_type, created_at
+        ) VALUES (
+            :event_hash, :request_id, :at, :day, :week, :account, :path, :method, :model,
+            :status, :failed, :input_tokens, :output_tokens, :reasoning_tokens,
+            :cached_tokens, :cache_tokens, :cache_read_tokens, :cache_creation_tokens,
+            :total_tokens, :known, :source, :latency_ms, :ttft_ms, :requested_model,
+            :resolved_model, :reasoning_effort, :service_tier, :executor_type, :created_at
+        )
+    """, values)
 
 
 def record_request_usage(
@@ -230,41 +627,47 @@ def record_request_usage(
     path: str,
     usage: Optional[dict],
     at: Optional[float] = None,
+    method: str = "",
+    model: str = "",
+    status: Optional[int] = None,
+    failed: bool = False,
+    source: str = "proxy",
+    latency_ms: Optional[float] = None,
+    ttft_ms: Optional[float] = None,
+    requested_model: str = "",
+    resolved_model: str = "",
+    reasoning_effort: str = "",
+    service_tier: str = "",
+    executor_type: str = "",
 ) -> None:
     """Persist exact usage when present, or mark the request as unknown."""
-    if not path or "codex" not in path and not path.startswith("/v1/responses"):
-        return
     epoch = at or time.time()
-    key = _request_key(request_id, account, path, epoch)
-    data = _load()
-    _prune(data, epoch)
-    requests = data.setdefault("requests", {})
-    existing = requests.get(key)
-    known = bool(usage)
-    if existing and (existing.get("known") or not known):
-        return
-    counter = _empty_counter()
-    if usage:
-        counter.update({
-            "input_tokens": int(usage.get("input_tokens") or 0),
-            "output_tokens": int(usage.get("output_tokens") or 0),
-            "total_tokens": int(usage.get("total_tokens") or 0),
-            "requests": 1,
-            "unknown_requests": 0,
-        })
-    else:
-        counter["requests"] = 1
-        counter["unknown_requests"] = 1
-    requests[key] = {
-        **counter,
-        "known": known,
-        "account": account,
-        "path": path,
-        "at": epoch,
-        "day": _day_key(epoch),
-        "week": _week_key(epoch),
-    }
-    _save(data)
+    try:
+        with _connect() as conn:
+            _prune(conn, epoch)
+            _insert_or_update_event(
+                conn,
+                request_id=request_id,
+                account=account,
+                path=path,
+                usage=usage,
+                at=epoch,
+                method=method,
+                model=model,
+                status=status,
+                failed=failed,
+                source=source,
+                latency_ms=latency_ms,
+                ttft_ms=ttft_ms,
+                requested_model=requested_model,
+                resolved_model=resolved_model,
+                reasoning_effort=reasoning_effort,
+                service_tier=service_tier,
+                executor_type=executor_type,
+            )
+            conn.commit()
+    except sqlite3.Error as e:
+        logger.warning("failed to save token usage history: %s", e)
 
 
 def _date_series(days: int) -> list[str]:
@@ -281,38 +684,207 @@ def _week_series(weeks: int) -> list[str]:
 
 
 def _add(target: dict, source: dict) -> None:
-    for key in ("input_tokens", "output_tokens", "total_tokens", "requests", "unknown_requests"):
+    for key in COUNTER_KEYS:
         target[key] = int(target.get(key) or 0) + int(source.get(key) or 0)
 
 
-def summary() -> dict:
-    data = _load()
+def _where_clause(*, account: str = "", model: str = "", since: Optional[float] = None, until: Optional[float] = None) -> tuple[str, list[Any]]:
+    clauses = []
+    params: list[Any] = []
+    if account:
+        clauses.append("account = ?")
+        params.append(account)
+    if model:
+        clauses.append("model = ?")
+        params.append(model)
+    if since is not None:
+        clauses.append("at >= ?")
+        params.append(float(since))
+    if until is not None:
+        clauses.append("at <= ?")
+        params.append(float(until))
+    return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+
+def _row_counter(row: sqlite3.Row) -> dict:
+    return {
+        "input_tokens": int(row["input_tokens"] or 0),
+        "output_tokens": int(row["output_tokens"] or 0),
+        "reasoning_tokens": int(row["reasoning_tokens"] or 0),
+        "cached_tokens": int(row["cached_tokens"] or 0),
+        "cache_tokens": int(row["cache_tokens"] or 0),
+        "cache_read_tokens": int(row["cache_read_tokens"] or 0),
+        "cache_creation_tokens": int(row["cache_creation_tokens"] or 0),
+        "total_tokens": int(row["total_tokens"] or 0),
+        "requests": int(row["requests"] or 0),
+        "unknown_requests": int(row["unknown_requests"] or 0),
+    }
+
+
+def _clamped_daily_days(value: Optional[int]) -> int:
+    try:
+        days = int(value) if value is not None else DAILY_DAYS
+    except (TypeError, ValueError):
+        days = DAILY_DAYS
+    return max(1, min(days, MAX_DAILY_DAYS))
+
+
+def summary(
+    *,
+    account: str = "",
+    model: str = "",
+    since: Optional[float] = None,
+    until: Optional[float] = None,
+    daily_days: Optional[int] = None,
+) -> dict:
     now = time.time()
-    _prune(data, now)
-    requests = data.setdefault("requests", {})
-    daily_keys = _date_series(DAILY_DAYS)
+    daily_keys = _date_series(_clamped_daily_days(daily_days))
     weekly_keys = _week_series(WEEKLY_WEEKS)
     daily = {key: {"date": key, **_empty_counter()} for key in daily_keys}
     weekly = {key: {"week_start": key, **_empty_counter()} for key in weekly_keys}
     total = _empty_counter()
     last_recorded_at = None
-    for row in requests.values():
-        if not isinstance(row, dict):
-            continue
-        day = row.get("day")
-        week = row.get("week")
-        if day in daily:
-            _add(daily[day], row)
-        if week in weekly:
-            _add(weekly[week], row)
-        _add(total, row)
-        at = float(row.get("at") or 0)
-        if at > 0 and (last_recorded_at is None or at > last_recorded_at):
-            last_recorded_at = at
-    _save(data)
+    try:
+        with _connect() as conn:
+            _prune(conn, now)
+            where, params = _where_clause(account=account, model=model, since=since, until=until)
+            daily_rows = conn.execute(f"""
+                SELECT day,
+                       SUM(input_tokens) AS input_tokens,
+                       SUM(output_tokens) AS output_tokens,
+                       SUM(reasoning_tokens) AS reasoning_tokens,
+                       SUM(cached_tokens) AS cached_tokens,
+                       SUM(cache_tokens) AS cache_tokens,
+                       SUM(cache_read_tokens) AS cache_read_tokens,
+                       SUM(cache_creation_tokens) AS cache_creation_tokens,
+                       SUM(total_tokens) AS total_tokens,
+                       COUNT(*) AS requests,
+                       SUM(CASE WHEN known = 0 THEN 1 ELSE 0 END) AS unknown_requests
+                FROM usage_events
+                {where}
+                GROUP BY day
+            """, params).fetchall()
+            for row in daily_rows:
+                if row["day"] in daily:
+                    _add(daily[row["day"]], _row_counter(row))
+
+            weekly_rows = conn.execute(f"""
+                SELECT week,
+                       SUM(input_tokens) AS input_tokens,
+                       SUM(output_tokens) AS output_tokens,
+                       SUM(reasoning_tokens) AS reasoning_tokens,
+                       SUM(cached_tokens) AS cached_tokens,
+                       SUM(cache_tokens) AS cache_tokens,
+                       SUM(cache_read_tokens) AS cache_read_tokens,
+                       SUM(cache_creation_tokens) AS cache_creation_tokens,
+                       SUM(total_tokens) AS total_tokens,
+                       COUNT(*) AS requests,
+                       SUM(CASE WHEN known = 0 THEN 1 ELSE 0 END) AS unknown_requests
+                FROM usage_events
+                {where}
+                GROUP BY week
+            """, params).fetchall()
+            for row in weekly_rows:
+                if row["week"] in weekly:
+                    _add(weekly[row["week"]], _row_counter(row))
+
+            total_row = conn.execute(f"""
+                SELECT SUM(input_tokens) AS input_tokens,
+                       SUM(output_tokens) AS output_tokens,
+                       SUM(reasoning_tokens) AS reasoning_tokens,
+                       SUM(cached_tokens) AS cached_tokens,
+                       SUM(cache_tokens) AS cache_tokens,
+                       SUM(cache_read_tokens) AS cache_read_tokens,
+                       SUM(cache_creation_tokens) AS cache_creation_tokens,
+                       SUM(total_tokens) AS total_tokens,
+                       COUNT(*) AS requests,
+                       SUM(CASE WHEN known = 0 THEN 1 ELSE 0 END) AS unknown_requests,
+                       MAX(at) AS last_recorded_at
+                FROM usage_events
+                {where}
+            """, params).fetchone()
+            if total_row:
+                _add(total, _row_counter(total_row))
+                last = total_row["last_recorded_at"]
+                last_recorded_at = float(last) if last else None
+            conn.commit()
+    except sqlite3.Error as e:
+        logger.warning("failed to summarize token usage history: %s", e)
     return {
         "daily": [daily[key] for key in daily_keys],
         "weekly": [weekly[key] for key in weekly_keys],
         "total": total,
         "last_recorded_at": last_recorded_at,
+        "storage": "sqlite",
+        "history_available": True,
+        "counting_policy": COUNTING_POLICY,
+        "counting_policy_detail": COUNTING_POLICY_DETAIL,
+    }
+
+
+def events(
+    *,
+    limit: int = 50,
+    account: str = "",
+    model: str = "",
+    since: Optional[float] = None,
+    until: Optional[float] = None,
+) -> dict:
+    limit = max(1, min(int(limit or 50), 500))
+    try:
+        with _connect() as conn:
+            where, params = _where_clause(account=account, model=model, since=since, until=until)
+            rows = conn.execute(f"""
+                SELECT event_hash, request_id, at, day, week, account, path, method, model,
+                       status, failed, input_tokens, output_tokens, reasoning_tokens,
+                       cached_tokens, cache_tokens, cache_read_tokens, cache_creation_tokens,
+                       total_tokens, known, source, latency_ms, ttft_ms, requested_model,
+                       resolved_model, reasoning_effort, service_tier, executor_type
+                FROM usage_events
+                {where}
+                ORDER BY at DESC, id DESC
+                LIMIT ?
+            """, [*params, limit]).fetchall()
+    except sqlite3.Error as e:
+        logger.warning("failed to list token usage history: %s", e)
+        rows = []
+    return {
+        "events": [
+            {
+                "event_hash": row["event_hash"],
+                "request_id": row["request_id"] or "",
+                "at": row["at"],
+                "day": row["day"],
+                "week": row["week"],
+                "account": row["account"],
+                "path": row["path"],
+                "method": row["method"] or "",
+                "model": row["model"] or "",
+                "status": row["status"],
+                "failed": bool(row["failed"]),
+                "input_tokens": int(row["input_tokens"] or 0),
+                "output_tokens": int(row["output_tokens"] or 0),
+                "reasoning_tokens": int(row["reasoning_tokens"] or 0),
+                "cached_tokens": int(row["cached_tokens"] or 0),
+                "cache_tokens": int(row["cache_tokens"] or 0),
+                "cache_read_tokens": int(row["cache_read_tokens"] or 0),
+                "cache_creation_tokens": int(row["cache_creation_tokens"] or 0),
+                "total_tokens": int(row["total_tokens"] or 0),
+                "latency_ms": row["latency_ms"],
+                "ttft_ms": row["ttft_ms"],
+                "requested_model": row["requested_model"] or "",
+                "resolved_model": row["resolved_model"] or "",
+                "reasoning_effort": row["reasoning_effort"] or "",
+                "service_tier": row["service_tier"] or "",
+                "executor_type": row["executor_type"] or "",
+                "known": bool(row["known"]),
+                "source": row["source"],
+            }
+            for row in rows
+        ],
+        "limit": limit,
+        "storage": "sqlite",
+        "history_available": True,
+        "counting_policy": COUNTING_POLICY,
+        "counting_policy_detail": COUNTING_POLICY_DETAIL,
     }

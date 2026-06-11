@@ -31,11 +31,11 @@ from login_manager import LoginManager, find_codex_cli
 from proxy_core import handle as proxy_handle
 from quota_tracker import refresh_once as refresh_quota_once, run as quota_run, status as quota_status
 import service_manager
-from usage_stats import summary as usage_summary
+from usage_stats import events as usage_events, summary as usage_summary
+from version import APP_VERSION
 
 CODE_CLI = find_codex_cli() or "/Applications/Codex.app/Contents/Resources/codex"
 CODEX_AUTH_PATH = codex_config.CODEX_CONFIG_PATH.parent / "auth.json"
-APP_VERSION = "0.6.0"
 
 # ── Setup ──────────────────────────────────────────────────────────────
 
@@ -374,11 +374,55 @@ async def api_quota_refresh(request: web.Request) -> web.Response:
 
 async def api_token_usage(request: web.Request) -> web.Response:
     """GET /api/token-usage — return captured exact token usage aggregates."""
-    return web.json_response(usage_summary())
+    return web.json_response(usage_summary(
+        account=_query_get(request, "account", ""),
+        model=_query_get(request, "model", ""),
+        since=_float_query(request, "since"),
+        until=_float_query(request, "until"),
+        daily_days=_int_query(request, "daily_days", 31),
+    ))
+
+
+def _query_get(request: web.Request, key: str, default: str = "") -> str:
+    query = getattr(request, "query", None)
+    getter = getattr(query, "get", None)
+    if not callable(getter):
+        return default
+    value = getter(key, default)
+    return value if isinstance(value, str) else default
+
+
+def _int_query(request: web.Request, key: str, default: int) -> int:
+    try:
+        return int(_query_get(request, key, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_query(request: web.Request, key: str) -> Optional[float]:
+    value = _query_get(request, key, "")
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def api_token_usage_events(request: web.Request) -> web.Response:
+    """GET /api/token-usage/events — return recent persisted token usage rows."""
+    return web.json_response(usage_events(
+        limit=_int_query(request, "limit", 50),
+        account=_query_get(request, "account", ""),
+        model=_query_get(request, "model", ""),
+        since=_float_query(request, "since"),
+        until=_float_query(request, "until"),
+    ))
 
 
 async def api_status(request: web.Request) -> web.Response:
     """GET /api/status — proxy health and stats."""
+    service = service_manager.status()
     disabled_accounts = sum(1 for acct in pool.accounts if not acct.enabled)
     rate_limited_accounts = sum(1 for acct in pool.accounts if acct.is_rate_limited)
     recent_requests = list(pool.recent_requests)
@@ -402,6 +446,27 @@ async def api_status(request: web.Request) -> web.Response:
     ]
     return web.json_response({
         "version": APP_VERSION,
+        "bundle_version": service.get("bundle_version"),
+        "runtime_version": service.get("runtime_version"),
+        "proxy_version": APP_VERSION,
+        "manifest_ok": service.get("manifest_ok"),
+        "manifest_error": service.get("manifest_error"),
+        "expected_version": service.get("expected_version"),
+        "running_version": service.get("running_version"),
+        "installed_program": service.get("installed_program"),
+        "source_dir": service.get("source_dir"),
+        "runtime_dir": service.get("runtime_dir"),
+        "service": {
+            "expected_version": service.get("expected_version"),
+            "running_version": service.get("running_version"),
+            "bundle_version": service.get("bundle_version"),
+            "runtime_version": service.get("runtime_version"),
+            "manifest_ok": service.get("manifest_ok"),
+            "manifest_error": service.get("manifest_error"),
+            "installed_program": service.get("installed_program"),
+            "source_dir": service.get("source_dir"),
+            "runtime_dir": service.get("runtime_dir"),
+        },
         "total_accounts": len(pool.accounts),
         "active_accounts": pool.active_count(),
         "disabled_accounts": disabled_accounts,
@@ -458,8 +523,13 @@ async def api_health(request: web.Request) -> web.Response:
 
 async def api_version(request: web.Request) -> web.Response:
     """GET /api/version — return app version and available management features."""
+    service = service_manager.status()
     return web.json_response({
         "version": APP_VERSION,
+        "bundle_version": service.get("bundle_version"),
+        "runtime_version": service.get("runtime_version"),
+        "manifest_ok": service.get("manifest_ok"),
+        "manifest_error": service.get("manifest_error"),
         "features": {
             "selection": True,
             "request_id": True,
@@ -621,6 +691,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/quota", api_quota)
     app.router.add_post("/api/quota/refresh", api_quota_refresh)
     app.router.add_get("/api/token-usage", api_token_usage)
+    app.router.add_get("/api/token-usage/events", api_token_usage_events)
     app.router.add_get("/api/health", api_health)
     app.router.add_get("/api/status", api_status)
     app.router.add_get("/api/version", api_version)

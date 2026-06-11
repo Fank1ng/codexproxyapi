@@ -33,9 +33,33 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
 .fill.warn{background:var(--amber)}.fill.bad{background:var(--red)}
 .sub{display:block;color:var(--muted);font-size:12px;margin-top:2px}
 .toolbar{display:flex;gap:8px;align-items:center}
+.token-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}
+.usage-charts{display:grid;grid-template-columns:minmax(280px,1fr) minmax(320px,1.35fr);gap:18px;align-items:start}
+.chart-title{font-size:12px;font-weight:700;color:var(--muted);margin-bottom:8px}
+.bar-chart{height:150px;display:grid;grid-template-columns:repeat(31,minmax(4px,1fr));gap:3px;align-items:end;border-bottom:1px solid var(--line);padding-top:8px}
+.usage-bar{position:relative;min-height:3px;border-radius:4px 4px 0 0;background:var(--blue);opacity:.85;outline:0}
+.usage-bar:hover,.usage-bar:focus{opacity:1;box-shadow:0 0 0 2px color-mix(in srgb,var(--blue) 35%,transparent)}
+.heatmap-wrap{overflow-x:auto;padding-bottom:2px}
+.heatmap{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,12px);grid-auto-columns:12px;gap:3px;width:max-content}
+.heat-cell{position:relative;width:12px;height:12px;border-radius:3px;background:var(--line);outline:0}
+.heat-cell[data-level="1"]{background:color-mix(in srgb,var(--green) 28%,var(--panel))}
+.heat-cell[data-level="2"]{background:color-mix(in srgb,var(--green) 48%,var(--panel))}
+.heat-cell[data-level="3"]{background:color-mix(in srgb,var(--green) 68%,var(--panel))}
+.heat-cell[data-level="4"]{background:var(--green)}
+.heat-cell:hover,.heat-cell:focus{box-shadow:0 0 0 2px var(--blue);z-index:2}
+.tooltip-source{position:relative}
+.tooltip-source:hover::after,.tooltip-source:focus::after{content:attr(data-tip);position:absolute;left:50%;bottom:calc(100% + 8px);transform:translateX(-50%);z-index:10;width:max-content;max-width:240px;white-space:pre-line;background:var(--text);color:var(--bg);border-radius:6px;padding:7px 9px;font-size:12px;line-height:1.35;box-shadow:0 8px 24px rgba(0,0,0,.24);pointer-events:none}
+.quota-donuts{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.donut-item{display:flex;align-items:center;gap:7px;min-width:92px}
+.donut{width:42px;height:42px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--ring) calc(var(--value)*1%),var(--line) 0);position:relative;flex:0 0 auto}
+.donut::after{content:"";position:absolute;inset:6px;border-radius:50%;background:var(--panel)}
+.donut span{position:relative;z-index:1;font-size:11px;font-weight:700;color:var(--text)}
+.donut.ok{--ring:var(--green)}.donut.warn{--ring:var(--amber)}.donut.bad{--ring:var(--red)}.donut.empty{--ring:var(--line)}
+.donut-label{font-size:12px;font-weight:700}.donut-note{display:block;color:var(--muted);font-size:11px;line-height:1.2}
 button{border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:6px;padding:8px 11px;cursor:pointer}
 button:hover{border-color:var(--blue)}
-@media(max-width:760px){header{display:block}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}table{font-size:12px}}
+@media(max-width:900px){.usage-charts{grid-template-columns:1fr}}
+@media(max-width:760px){header{display:block}.grid,.token-grid{grid-template-columns:repeat(2,minmax(0,1fr))}table{font-size:12px}.quota-donuts{min-width:210px}}
 </style>
 </head>
 <body>
@@ -68,6 +92,11 @@ button:hover{border-color:var(--blue)}
   </section>
 
   <section class="card" style="margin-top:12px">
+    <h2>Token 历史消耗</h2>
+    <div id="token-usage" class="muted">加载中...</div>
+  </section>
+
+  <section class="card" style="margin-top:12px">
     <h2>最近请求</h2>
     <div id="recent" class="muted">加载中...</div>
   </section>
@@ -86,13 +115,15 @@ async function fetchJSON(path, options = {}) {
 }
 
 async function refreshAll() {
-  const [status, accounts, quota] = await Promise.all([
+  const [status, accounts, quota, tokenUsage] = await Promise.all([
     fetchJSON('/api/status'),
     fetchJSON('/api/accounts'),
     fetchJSON('/api/quota'),
+    fetchJSON('/api/token-usage?daily_days=371'),
   ]);
   renderStatus(status);
   renderAccounts(Array.isArray(accounts) ? accounts : [], quota && !quota.error ? quota : {});
+  renderTokenUsage(tokenUsage);
 }
 
 async function refreshQuota() {
@@ -165,7 +196,7 @@ function renderAccounts(accounts, quota) {
     document.getElementById('account-list').innerHTML = '<p>未发现账号。请用本地 App 生成登录命令或导入当前账号。</p>';
     return;
   }
-  document.getElementById('account-list').innerHTML = `<table><thead><tr><th>名称</th><th>Email</th><th>状态</th><th>5h 剩余</th><th>7d 剩余</th><th>刷新时间</th><th>Token</th></tr></thead><tbody>${
+  document.getElementById('account-list').innerHTML = `<table><thead><tr><th>名称</th><th>Email</th><th>状态</th><th>额度</th><th>刷新时间</th><th>Token</th></tr></thead><tbody>${
     accounts.map(account => {
       const q = quota?.[account.name] || null;
       const summary = quotaSummary(q);
@@ -173,13 +204,74 @@ function renderAccounts(accounts, quota) {
       <td><strong>${esc(account.name || '-')}</strong></td>
       <td>${esc(account.email || '-')}</td>
       <td>${accountState(account)}</td>
-      <td>${quotaCell(summary.fiveHour)}</td>
-      <td>${quotaCell(summary.sevenDay)}</td>
+      <td>${quotaDonuts(summary)}</td>
       <td>${refreshCell(summary)}</td>
       <td>${account.expires_at ? esc(new Date(account.expires_at * 1000).toLocaleString()) : '-'}</td>
     </tr>`;
     }).join('')
   }</tbody></table>`;
+}
+
+function renderTokenUsage(usage) {
+  const total = usage?.total || {};
+  const daily = Array.isArray(usage?.daily) ? usage.daily : [];
+  const weekly = Array.isArray(usage?.weekly) ? usage.weekly : [];
+  const today = daily.length ? daily[daily.length - 1] : {};
+  const thisWeek = weekly.length ? weekly[weekly.length - 1] : {};
+  const updated = usage?.last_recorded_at ? formatTime(usage.last_recorded_at) : '暂无记录';
+  const recentDays = daily.slice(-31);
+  const maxRecent = Math.max(1, ...recentDays.map(row => Number(row.total_tokens) || 0));
+  const maxHeat = Math.max(1, ...daily.map(row => Number(row.total_tokens) || 0));
+  const cards = `
+    <div class="token-grid">
+      <div><div class="num">${formatTokenCount(today.total_tokens || 0)}</div><div class="label">今日 Token</div></div>
+      <div><div class="num">${formatTokenCount(thisWeek.total_tokens || 0)}</div><div class="label">本周 Token</div></div>
+      <div><div class="num">${formatTokenCount(total.total_tokens || 0)}</div><div class="label">371天 Token</div></div>
+      <div><div class="num">${total.requests || 0}</div><div class="label">请求数 · ${esc(updated)}</div></div>
+    </div>`;
+  if (!daily.length || !total.requests) {
+    document.getElementById('token-usage').innerHTML = `${cards}<p>暂无 token 消耗历史。新的 Codex 请求经过代理后会开始记录。</p>`;
+    return;
+  }
+  document.getElementById('token-usage').innerHTML = `${cards}
+    <div class="usage-charts">
+      <div>
+        <div class="chart-title">最近 31 天柱状图</div>
+        <div class="bar-chart">${recentDays.map(row => usageBar(row, maxRecent)).join('')}</div>
+      </div>
+      <div>
+        <div class="chart-title">最近 371 天热力表</div>
+        <div class="heatmap-wrap"><div class="heatmap">${heatmapCells(daily, maxHeat)}</div></div>
+      </div>
+    </div>`;
+}
+
+function usageBar(row, maxValue) {
+  const total = Number(row.total_tokens) || 0;
+  const height = total ? Math.max(3, Math.round((total / maxValue) * 100)) : 3;
+  const tip = usageTip(row);
+  return `<div class="usage-bar tooltip-source" tabindex="0" data-tip="${esc(tip)}" title="${esc(tip)}" style="height:${height}%"></div>`;
+}
+
+function heatmapCells(rows, maxValue) {
+  const blanks = rows.length ? new Date(`${rows[0].date}T00:00:00`).getDay() : 0;
+  const leading = Array.from({ length: blanks }, () => '<span></span>').join('');
+  return leading + rows.map(row => {
+    const total = Number(row.total_tokens) || 0;
+    const level = total <= 0 ? 0 : Math.max(1, Math.min(4, Math.ceil((total / maxValue) * 4)));
+    const tip = usageTip(row);
+    return `<div class="heat-cell tooltip-source" tabindex="0" data-level="${level}" data-tip="${esc(tip)}" title="${esc(tip)}"></div>`;
+  }).join('');
+}
+
+function usageTip(row) {
+  return [
+    row.date || row.week_start || '-',
+    `Token: ${formatTokenCount(row.total_tokens || 0)}`,
+    `请求: ${row.requests || 0}`,
+    `输入/输出: ${formatTokenCount(row.input_tokens || 0)} / ${formatTokenCount(row.output_tokens || 0)}`,
+    `未知 usage: ${row.unknown_requests || 0}`
+  ].join('\n');
 }
 
 function quotaSummary(data) {
@@ -198,7 +290,7 @@ function quotaSummary(data) {
   const fiveHour = quotaWindow(primary, data?.['5h_usage']);
   let sevenDay = quotaWindow(secondary, data?.weekly_usage);
   let sevenDayNote = '';
-  if (!sevenDay.value && data && ['free', 'go'].includes(String(data.plan_type || '').toLowerCase())) {
+  if (usesSharedCodexWindow(data, primary, secondary)) {
     sevenDay = quotaWindow(primary, data?.['5h_usage']);
     sevenDayNote = '共享窗口';
   }
@@ -208,6 +300,19 @@ function quotaSummary(data) {
     fetchedAt: numberOrNull(data?._fetched_at),
     planType: data?.plan_type || '',
   };
+}
+
+function usesSharedCodexWindow(data, primary, secondary) {
+  const plan = String(data?.plan_type || '').toLowerCase();
+  if (!['free', 'go'].includes(plan)) return false;
+  return !hasDistinctWeeklyWindow(primary, secondary);
+}
+
+function hasDistinctWeeklyWindow(primary, secondary) {
+  const secondarySeconds = numberOrNull(secondary?.limit_window_seconds);
+  if (secondarySeconds == null || secondarySeconds < 604800 * 0.9) return false;
+  const primarySeconds = numberOrNull(primary?.limit_window_seconds);
+  return primarySeconds == null || Math.abs(secondarySeconds - primarySeconds) >= 60;
 }
 
 function quotaWindow(windowData, fallbackUsed) {
@@ -227,6 +332,20 @@ function quotaCell(item) {
   const used = item.used == null ? '' : `<span class="sub">已用 ${formatPercent(item.used)}</span>`;
   const note = item.note ? `<span class="sub">${esc(item.note)}</span>` : '';
   return `<strong>${formatPercent(item.value)}</strong><div class="bar"><div class="fill ${cls}" style="width:${clamp(item.value, 0, 100)}%"></div></div>${used}${note}`;
+}
+
+function quotaDonuts(summary) {
+  return `<div class="quota-donuts">${quotaDonut('5h', summary.fiveHour)}${quotaDonut('7d', summary.sevenDay)}</div>`;
+}
+
+function quotaDonut(label, item) {
+  if (item.value == null) {
+    return `<div class="donut-item"><div class="donut empty" style="--value:0"><span>-</span></div><div><span class="donut-label">${esc(label)}</span><span class="donut-note">${esc(item.note || '无数据')}</span></div></div>`;
+  }
+  const cls = item.value <= 5 ? 'bad' : item.value <= 25 ? 'warn' : 'ok';
+  const note = item.note || (item.used == null ? '' : `已用 ${formatPercent(item.used)}`);
+  const tip = `${label} 剩余 ${formatPercent(item.value)}${item.used == null ? '' : `\n已用 ${formatPercent(item.used)}`}${item.resetAt ? `\n重置 ${formatTime(item.resetAt)}` : ''}${item.note ? `\n${item.note}` : ''}`;
+  return `<div class="donut-item tooltip-source" tabindex="0" data-tip="${esc(tip)}" title="${esc(tip)}"><div class="donut ${cls}" style="--value:${clamp(item.value, 0, 100)}"><span>${formatPercent(item.value)}</span></div><div><span class="donut-label">${esc(label)}</span><span class="donut-note">${esc(note)}</span></div></div>`;
 }
 
 function refreshCell(summary) {
@@ -275,6 +394,13 @@ function formatPercent(value) {
 
 function formatTime(epochSeconds) {
   return new Date(epochSeconds * 1000).toLocaleString();
+}
+
+function formatTokenCount(value) {
+  const n = Number(value) || 0;
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+  return String(Math.round(n));
 }
 
 refreshAll();

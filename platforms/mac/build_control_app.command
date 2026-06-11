@@ -9,7 +9,8 @@ RESOURCES="$APP/Contents/Resources"
 RUNTIME="$RESOURCES/runtime"
 VENDOR="$RUNTIME/vendor"
 APP_ICON="$CORE_DIR/static/icons/AppIcon.icns"
-APP_VERSION="${APP_VERSION:-0.6.0}"
+VERSION_FILE="$ROOT/VERSION"
+APP_VERSION="${APP_VERSION:-$(tr -d '[:space:]' < "$VERSION_FILE")}"
 PYTHON="${PYTHON:-/usr/bin/python3}"
 PYTHON_FRAMEWORK="${PYTHON_FRAMEWORK:-/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework}"
 SIGNED_APP="${SIGNED_APP:-/private/tmp/小腊肠.app}"
@@ -57,9 +58,40 @@ if [ ! -f "$APP_ICON" ]; then
   exit 1
 fi
 
+if [ -z "$APP_VERSION" ]; then
+  echo "VERSION is empty." >&2
+  exit 1
+fi
+
+"$PYTHON" - <<'PY' "$ROOT"
+import filecmp
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+pairs = [
+    ("src/core/proxy.py", "platforms/mac/core/proxy.py"),
+    ("src/core/proxy_core.py", "platforms/mac/core/proxy_core.py"),
+    ("src/core/usage_stats.py", "platforms/mac/core/usage_stats.py"),
+    ("src/core/version.py", "platforms/mac/core/version.py"),
+    ("src/core/runtime_manifest.py", "platforms/mac/core/runtime_manifest.py"),
+    ("src/core/static/index.html", "platforms/mac/core/static/index.html"),
+]
+failed = []
+for left, right in pairs:
+    if not (root / left).is_file() or not (root / right).is_file() or not filecmp.cmp(root / left, root / right, shallow=False):
+        failed.append(f"{left} != {right}")
+if failed:
+    print("Refusing to build with unsynced mac runtime sources:", file=sys.stderr)
+    for item in failed:
+        print(f"  {item}", file=sys.stderr)
+    sys.exit(1)
+PY
+
 for file in "$CORE_DIR"/*.py; do
   cp "$file" "$RUNTIME/$(basename "$file")"
 done
+cp "$VERSION_FILE" "$RUNTIME/VERSION"
 cp "$CORE_DIR/config.json" "$RUNTIME/config.json"
 cp "$ROOT/requirements.txt" "$RUNTIME/requirements.txt"
 
@@ -164,11 +196,40 @@ chmod +x "$APP/Contents/MacOS/小腊肠"
 
 find "$APP" -name ".DS_Store" -delete
 find "$RUNTIME" \( -name "*.log" -o -name "recent_requests.json" \) -delete
+if rg -n "精确捕获|无 usage" "$RUNTIME" "$MAC_DIR/ControlApp.m" >/dev/null; then
+  echo "Refusing to build with removed token usage copy still present." >&2
+  exit 1
+fi
+if ! rg -n "/api/token-usage/events" "$RUNTIME/proxy.py" "$RUNTIME/static/index.html" >/dev/null; then
+  echo "Refusing to build without token usage events API wiring." >&2
+  exit 1
+fi
 AUTH_LEAK="$(find "$RUNTIME" -path "*/accounts/*/auth.json" -print -quit)"
 if [ -n "$AUTH_LEAK" ]; then
   echo "Refusing to build app bundle with account credential: $AUTH_LEAK" >&2
   exit 1
 fi
+
+"$PYTHON" - <<'PY' "$RUNTIME" "$APP_VERSION"
+import json
+import sys
+from pathlib import Path
+
+runtime = Path(sys.argv[1])
+expected_version = sys.argv[2]
+sys.path.insert(0, str(runtime))
+from runtime_manifest import BUILD_MANIFEST, compare_manifests, generate_manifest, write_manifest
+from version import app_version
+
+observed_version = app_version(runtime)
+if observed_version != expected_version:
+    raise SystemExit(f"runtime VERSION mismatch: expected {expected_version}, observed {observed_version}")
+build = write_manifest(runtime, manifest_name=BUILD_MANIFEST)
+runtime_manifest = generate_manifest(runtime, manifest_name="runtime_manifest.json")
+check = compare_manifests(build, runtime_manifest)
+if not check.get("ok"):
+    raise SystemExit("bundle runtime manifest self-check failed: " + json.dumps(check, sort_keys=True))
+PY
 
 clear_bundle_xattrs "$APP"
 

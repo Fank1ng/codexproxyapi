@@ -67,6 +67,85 @@ static NSString *CPRelativeTime(id epochValue) {
     return [formatter stringFromDate:date] ?: @"-";
 }
 
+static NSDate *CPDateFromString(NSString *dateString) {
+    if (!dateString.length) {
+        return nil;
+    }
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    formatter.dateFormat = @"yyyy-MM-dd";
+    return [formatter dateFromString:dateString];
+}
+
+static NSString *CPDateStringFromDate(NSDate *date) {
+    if (!date) {
+        return @"";
+    }
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    formatter.dateFormat = @"yyyy-MM-dd";
+    return [formatter stringFromDate:date] ?: @"";
+}
+
+static NSString *CPWeekStartForDateString(NSString *dateString) {
+    NSDate *date = CPDateFromString(dateString);
+    if (!date) {
+        return @"";
+    }
+    NSCalendar *calendar = [NSCalendar.currentCalendar copy];
+    calendar.firstWeekday = 2;
+    NSDateComponents *components = [calendar components:NSCalendarUnitYearForWeekOfYear | NSCalendarUnitWeekOfYear fromDate:date];
+    NSDate *weekStart = [calendar dateFromComponents:components];
+    return CPDateStringFromDate(weekStart);
+}
+
+static NSInteger CPWeekdayIndexForDateString(NSString *dateString) {
+    NSDate *date = CPDateFromString(dateString);
+    if (!date) {
+        return 0;
+    }
+    NSDateComponents *components = [NSCalendar.currentCalendar components:NSCalendarUnitWeekday fromDate:date];
+    return MAX(0, (NSInteger)components.weekday - 1);
+}
+
+static NSString *CPExactTokenCount(id value) {
+    return [NSString stringWithFormat:@"%.0f", CPDouble(value)];
+}
+
+static NSString *CPTokenUsagePeriodLabel(NSDictionary *row) {
+    NSString *period = CPString(row[@"period_label"]);
+    if (period.length) {
+        return period;
+    }
+    NSString *date = CPString(row[@"date"]);
+    if (date.length) {
+        return date;
+    }
+    NSString *week = CPString(row[@"week_start"]);
+    if (week.length) {
+        return [NSString stringWithFormat:@"周起 %@", week];
+    }
+    return CPRelativeTime(row[@"at"]);
+}
+
+static NSString *CPTokenUsageTooltip(NSDictionary *row) {
+    NSInteger requests = (NSInteger)CPDouble(row[@"requests"]);
+    NSInteger unknown = (NSInteger)CPDouble(row[@"unknown_requests"]);
+    NSInteger known = MAX(0, requests - unknown);
+    return [NSString stringWithFormat:@"%@\n总计 %@ tokens\n输入 %@ · 输出 %@\nReasoning %@ · Cached %@\nCache read %@ · Cache create %@\n请求 %ld · 已知 %ld · 未知 %ld\n本地代理捕获口径",
+            CPTokenUsagePeriodLabel(row),
+            CPExactTokenCount(row[@"total_tokens"]),
+            CPExactTokenCount(row[@"input_tokens"]),
+            CPExactTokenCount(row[@"output_tokens"]),
+            CPExactTokenCount(row[@"reasoning_tokens"]),
+            CPExactTokenCount(row[@"cached_tokens"]),
+            CPExactTokenCount(row[@"cache_read_tokens"]),
+            CPExactTokenCount(row[@"cache_creation_tokens"]),
+            (long)requests,
+            (long)known,
+            (long)unknown];
+}
+
 @interface ControlWindowController : NSObject <NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) NSSplitView *splitView;
@@ -86,9 +165,11 @@ static NSString *CPRelativeTime(id epochValue) {
 @property(nonatomic, strong) NSDictionary *statusSnapshot;
 @property(nonatomic, strong) NSDictionary *quotaSnapshot;
 @property(nonatomic, strong) NSDictionary *tokenUsageSnapshot;
+@property(nonatomic, strong) NSArray<NSDictionary *> *tokenUsageEvents;
 @property(nonatomic, copy) NSString *activeSection;
 @property(nonatomic, copy) NSString *selectedAccountName;
 @property(nonatomic, copy) NSString *appBundlePath;
+@property(nonatomic, copy) NSString *frontendVersion;
 @property(nonatomic, copy) NSString *resourceRuntimeDir;
 @property(nonatomic, copy) NSString *runtimeDir;
 @property(nonatomic, copy) NSString *resultPath;
@@ -111,14 +192,22 @@ static NSString *CPRelativeTime(id epochValue) {
 @interface CPQuotaRingView : NSView
 @property(nonatomic, assign) double progress;
 @property(nonatomic, copy) NSString *centerText;
+@property(nonatomic, strong) NSColor *ringColor;
 @end
 
 @interface CPBarChartView : NSView
 @property(nonatomic, strong) NSArray<NSDictionary *> *rows;
+@property(nonatomic, strong) NSMutableArray<NSValue *> *hitRects;
+@property(nonatomic, assign) NSInteger hoverIndex;
+@property(nonatomic, strong) NSTrackingArea *cpTrackingArea;
 @end
 
 @interface CPHeatmapView : NSView
 @property(nonatomic, strong) NSArray<NSDictionary *> *rows;
+@property(nonatomic, strong) NSMutableArray<NSValue *> *hitRects;
+@property(nonatomic, strong) NSMutableArray<NSNumber *> *hitIndexes;
+@property(nonatomic, assign) NSInteger hoverIndex;
+@property(nonatomic, strong) NSTrackingArea *cpTrackingArea;
 @end
 
 @implementation CPFlippedStackView
@@ -183,6 +272,10 @@ static NSString *CPRelativeTime(id epochValue) {
     _centerText = [centerText copy];
     self.needsDisplay = YES;
 }
+- (void)setRingColor:(NSColor *)ringColor {
+    _ringColor = ringColor;
+    self.needsDisplay = YES;
+}
 - (void)drawRect:(NSRect)dirtyRect {
     [super drawRect:dirtyRect];
     CGFloat side = MIN(self.bounds.size.width, self.bounds.size.height) - 14;
@@ -198,7 +291,7 @@ static NSString *CPRelativeTime(id epochValue) {
     [arc appendBezierPathWithArcWithCenter:center radius:radius startAngle:-90 endAngle:-90 + (360 * self.progress) clockwise:NO];
     arc.lineWidth = 9;
     arc.lineCapStyle = NSLineCapStyleRound;
-    [NSColor.controlAccentColor setStroke];
+    [(self.ringColor ?: NSColor.controlAccentColor) setStroke];
     [arc stroke];
 
     NSString *text = self.centerText.length ? self.centerText : @"-";
@@ -215,11 +308,44 @@ static NSString *CPRelativeTime(id epochValue) {
 - (BOOL)isFlipped { return YES; }
 - (void)setRows:(NSArray<NSDictionary *> *)rows {
     _rows = rows;
+    self.hoverIndex = -1;
+    self.needsDisplay = YES;
+}
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (self.cpTrackingArea) {
+        [self removeTrackingArea:self.cpTrackingArea];
+    }
+    self.cpTrackingArea = [[NSTrackingArea alloc] initWithRect:self.bounds
+                                                       options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect)
+                                                         owner:self
+                                                      userInfo:nil];
+    [self addTrackingArea:self.cpTrackingArea];
+}
+- (void)mouseMoved:(NSEvent *)event {
+    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    NSInteger index = -1;
+    for (NSInteger i = 0; i < self.hitRects.count; i++) {
+        if (NSPointInRect(point, self.hitRects[i].rectValue)) {
+            index = i;
+            break;
+        }
+    }
+    if (index != self.hoverIndex) {
+        self.hoverIndex = index;
+        self.toolTip = index >= 0 && index < self.rows.count ? CPTokenUsageTooltip(self.rows[index]) : nil;
+        self.needsDisplay = YES;
+    }
+}
+- (void)mouseExited:(NSEvent *)event {
+    self.hoverIndex = -1;
+    self.toolTip = nil;
     self.needsDisplay = YES;
 }
 - (void)drawRect:(NSRect)dirtyRect {
     [super drawRect:dirtyRect];
     NSArray *rows = self.rows ?: @[];
+    self.hitRects = [NSMutableArray array];
     if (!rows.count) {
         return;
     }
@@ -227,20 +353,31 @@ static NSString *CPRelativeTime(id epochValue) {
     for (NSDictionary *row in rows) {
         maxValue = MAX(maxValue, CPDouble(row[@"total_tokens"]));
     }
-    CGFloat inset = 10;
-    CGFloat chartHeight = self.bounds.size.height - 24;
-    CGFloat availableWidth = self.bounds.size.width - (inset * 2);
+    CGFloat horizontalInset = 10;
+    CGFloat topInset = 4;
+    CGFloat bottomInset = 0;
+    CGFloat baselineY = MAX(topInset + 1, self.bounds.size.height - bottomInset);
+    CGFloat chartHeight = MAX(1, baselineY - topInset);
+    CGFloat availableWidth = MAX(1, self.bounds.size.width - (horizontalInset * 2));
     CGFloat gap = 3;
     CGFloat barWidth = MAX(3, (availableWidth - gap * (rows.count - 1)) / rows.count);
     for (NSInteger i = 0; i < rows.count; i++) {
         NSDictionary *row = rows[i];
         double value = CPDouble(row[@"total_tokens"]);
-        CGFloat height = MAX(2, chartHeight * value / maxValue);
-        CGFloat x = inset + i * (barWidth + gap);
-        NSRect barRect = NSMakeRect(x, inset + chartHeight - height, barWidth, height);
+        CGFloat height = value > 0 ? MAX(2, chartHeight * value / maxValue) : 2;
+        height = MIN(height, chartHeight);
+        CGFloat x = horizontalInset + i * (barWidth + gap);
+        NSRect barRect = NSMakeRect(x, baselineY - height, barWidth, height);
+        [self.hitRects addObject:[NSValue valueWithRect:barRect]];
         NSBezierPath *bar = [NSBezierPath bezierPathWithRoundedRect:barRect xRadius:2 yRadius:2];
-        [[NSColor.controlAccentColor colorWithAlphaComponent:value > 0 ? 0.82 : 0.16] setFill];
+        BOOL hovered = i == self.hoverIndex;
+        [[NSColor.controlAccentColor colorWithAlphaComponent:hovered ? 0.98 : (value > 0 ? 0.82 : 0.16)] setFill];
         [bar fill];
+        if (hovered) {
+            [NSColor.labelColor setStroke];
+            bar.lineWidth = 1.4;
+            [bar stroke];
+        }
     }
 }
 @end
@@ -249,11 +386,55 @@ static NSString *CPRelativeTime(id epochValue) {
 - (BOOL)isFlipped { return YES; }
 - (void)setRows:(NSArray<NSDictionary *> *)rows {
     _rows = rows;
+    self.hoverIndex = -1;
     self.needsDisplay = YES;
+}
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (self.cpTrackingArea) {
+        [self removeTrackingArea:self.cpTrackingArea];
+    }
+    self.cpTrackingArea = [[NSTrackingArea alloc] initWithRect:self.bounds
+                                                       options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect)
+                                                         owner:self
+                                                      userInfo:nil];
+    [self addTrackingArea:self.cpTrackingArea];
+}
+- (void)mouseMoved:(NSEvent *)event {
+    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    NSInteger index = -1;
+    for (NSInteger i = 0; i < self.hitRects.count; i++) {
+        if (NSPointInRect(point, self.hitRects[i].rectValue)) {
+            index = i < self.hitIndexes.count ? self.hitIndexes[i].integerValue : i;
+            break;
+        }
+    }
+    if (index != self.hoverIndex) {
+        self.hoverIndex = index;
+        self.toolTip = index >= 0 && index < self.rows.count ? CPTokenUsageTooltip(self.rows[index]) : nil;
+        self.needsDisplay = YES;
+    }
+}
+- (void)mouseExited:(NSEvent *)event {
+    self.hoverIndex = -1;
+    self.toolTip = nil;
+    self.needsDisplay = YES;
+}
+- (NSInteger)weekdayForDateString:(NSString *)dateString {
+    return CPWeekdayIndexForDateString(dateString);
+}
+- (NSString *)monthLabelForDateString:(NSString *)dateString {
+    if (dateString.length < 7) {
+        return @"";
+    }
+    NSInteger month = [[dateString substringWithRange:NSMakeRange(5, 2)] integerValue];
+    return month > 0 ? [NSString stringWithFormat:@"%ld月", (long)month] : @"";
 }
 - (void)drawRect:(NSRect)dirtyRect {
     [super drawRect:dirtyRect];
     NSArray *rows = self.rows ?: @[];
+    self.hitRects = [NSMutableArray array];
+    self.hitIndexes = [NSMutableArray array];
     if (!rows.count) {
         return;
     }
@@ -261,24 +442,68 @@ static NSString *CPRelativeTime(id epochValue) {
     for (NSDictionary *row in rows) {
         maxValue = MAX(maxValue, CPDouble(row[@"total_tokens"]));
     }
-    CGFloat cell = 9;
-    CGFloat gap = 4;
-    NSInteger columns = MAX(1, floor((self.bounds.size.width - 10) / (cell + gap)));
+    NSInteger rowCount = 7;
+    NSInteger columns = 53;
+    NSInteger leading = [self weekdayForDateString:CPString(rows.firstObject[@"date"])];
+    NSInteger latestSlot = leading + rows.count - 1;
+    NSInteger latestWeekday = [self weekdayForDateString:CPString(rows.lastObject[@"date"])];
+    NSInteger firstVisibleSlot = latestSlot - ((columns - 1) * rowCount + latestWeekday);
+    CGFloat horizontalInset = 0;
+    CGFloat monthLabelHeight = 12;
+    CGFloat topInset = 0;
+    CGFloat gap = 0.2;
+    CGFloat availableWidth = MAX(1, self.bounds.size.width - horizontalInset * 2 - gap * MAX(0, columns - 1));
+    CGFloat availableHeight = MAX(1, self.bounds.size.height - monthLabelHeight - topInset - gap * MAX(0, rowCount - 1));
+    CGFloat cell = MIN(8, MIN(availableWidth / columns, availableHeight / rowCount));
+    cell = MAX(4, cell);
+    CGFloat gridWidth = columns * cell + MAX(0, columns - 1) * gap;
+    CGFloat xOrigin = horizontalInset + MAX(0, (self.bounds.size.width - horizontalInset * 2 - gridWidth) / 2.0);
+    CGFloat gridHeight = rowCount * cell + MAX(0, rowCount - 1) * gap;
+    CGFloat labelY = MAX(topInset + gridHeight + 2, self.bounds.size.height - monthLabelHeight);
+    CGFloat yOrigin = MAX(topInset, labelY - 3 - gridHeight);
+    NSMutableDictionary<NSNumber *, NSString *> *monthLabels = [NSMutableDictionary dictionary];
     for (NSInteger i = 0; i < rows.count; i++) {
         NSDictionary *row = rows[i];
-        NSInteger col = i % columns;
-        NSInteger line = i / columns;
-        CGFloat x = 5 + col * (cell + gap);
-        CGFloat y = 6 + line * (cell + gap);
-        if (y + cell > self.bounds.size.height) {
-            break;
+        NSInteger slot = leading + i - firstVisibleSlot;
+        if (slot < 0 || slot >= columns * rowCount) {
+            continue;
         }
+        NSInteger col = slot / 7;
+        NSInteger line = slot % 7;
+        CGFloat x = xOrigin + col * (cell + gap);
+        CGFloat y = yOrigin + line * (cell + gap);
+        NSString *date = CPString(row[@"date"]);
+        if (date.length >= 10 && [[date substringFromIndex:8] isEqualToString:@"01"]) {
+            monthLabels[@(col)] = [self monthLabelForDateString:date];
+        }
+        NSRect cellRect = NSMakeRect(x, y, cell, cell);
+        [self.hitRects addObject:[NSValue valueWithRect:cellRect]];
+        [self.hitIndexes addObject:@(i)];
         double ratio = maxValue <= 0 ? 0 : CPDouble(row[@"total_tokens"]) / maxValue;
+        BOOL hovered = i == self.hoverIndex;
         NSColor *color = ratio <= 0
             ? [NSColor.separatorColor colorWithAlphaComponent:0.35]
-            : [NSColor.controlAccentColor colorWithAlphaComponent:0.25 + 0.65 * ratio];
+            : [NSColor.controlAccentColor colorWithAlphaComponent:hovered ? 0.95 : (0.25 + 0.65 * ratio)];
         [color setFill];
-        [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(x, y, cell, cell) xRadius:2 yRadius:2] fill];
+        NSBezierPath *cellPath = [NSBezierPath bezierPathWithRoundedRect:cellRect xRadius:2 yRadius:2];
+        [cellPath fill];
+        if (hovered) {
+            [NSColor.labelColor setStroke];
+            cellPath.lineWidth = 1.2;
+            [cellPath stroke];
+        }
+    }
+    if (monthLabels.count) {
+        NSDictionary *attrs = @{
+            NSFontAttributeName: [NSFont systemFontOfSize:9 weight:NSFontWeightMedium],
+            NSForegroundColorAttributeName: NSColor.secondaryLabelColor,
+        };
+        for (NSNumber *colNumber in monthLabels) {
+            NSInteger col = colNumber.integerValue;
+            NSString *label = monthLabels[colNumber];
+            CGFloat x = xOrigin + col * (cell + gap);
+            [label drawAtPoint:NSMakePoint(x, labelY) withAttributes:attrs];
+        }
     }
 }
 @end
@@ -292,6 +517,7 @@ static NSString *CPRelativeTime(id epochValue) {
     }
     NSBundle *bundle = NSBundle.mainBundle;
     _appBundlePath = bundle.bundlePath;
+    _frontendVersion = CPDisplayString(bundle.infoDictionary[@"CFBundleShortVersionString"]);
     _resourceRuntimeDir = [bundle.resourceURL URLByAppendingPathComponent:@"runtime"].path;
     _runtimeDir = [@"~/Library/Application Support/xiaolachang" stringByExpandingTildeInPath];
     _resultPath = [_runtimeDir stringByAppendingPathComponent:@"control-result.txt"];
@@ -302,6 +528,7 @@ static NSString *CPRelativeTime(id epochValue) {
     _statusSnapshot = @{};
     _quotaSnapshot = @{};
     _tokenUsageSnapshot = @{};
+    _tokenUsageEvents = @[];
     _activeSection = @"overview";
     _tokenUsageMode = 0;
     return self;
@@ -480,7 +707,6 @@ static NSString *CPRelativeTime(id epochValue) {
     self.toolbarStack.translatesAutoresizingMaskIntoConstraints = NO;
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"刷新" symbol:@"arrow.clockwise" selector:@selector(refreshSnapshots:) primary:NO]];
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"启动/修复/更新后台" symbol:@"play.circle.fill" selector:@selector(repairAction:) primary:YES]];
-    [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"额度" symbol:@"chart.bar" selector:@selector(refreshQuotaAction:) primary:NO]];
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"打开 Web" symbol:@"safari" selector:@selector(openWebAction:) primary:NO]];
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"打开 Codex" symbol:@"arrow.up.forward.app" selector:@selector(openCodexAction:) primary:NO]];
     [header addSubview:self.toolbarStack];
@@ -541,7 +767,13 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (void)renderOverviewSection {
+    if ([self hasVersionMismatch]) {
+        [self.contentStack addArrangedSubview:[self constrainedContentView:[self versionMismatchCard] width:450]];
+    }
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self totalQuotaCard] width:450]];
+    if ([self shouldShowTokenHistoryWarning]) {
+        [self.contentStack addArrangedSubview:[self constrainedContentView:[self tokenHistoryWarningCard] width:450]];
+    }
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self tokenStatsCard] width:450]];
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self tokenBarChartCard] width:450]];
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self tokenHeatmapCard] width:450]];
@@ -572,6 +804,7 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (void)renderConfigSection {
+    [self.contentStack addArrangedSubview:[self constrainedContentView:[self updateDiagnosticsCard]]];
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self configCardsRow]]];
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self strategyCard]]];
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self streamModeCard]]];
@@ -613,6 +846,70 @@ static NSString *CPRelativeTime(id epochValue) {
         return YES;
     }
     return !CPBool(self.statusSnapshot[@"enabled"]);
+}
+
+- (BOOL)hasVersionMismatch {
+    if (!self.statusSnapshot.count) {
+        return NO;
+    }
+    NSString *frontend = CPString(self.frontendVersion);
+    NSString *bundle = CPString(self.statusSnapshot[@"bundle_version"]);
+    NSString *runtime = CPString(self.statusSnapshot[@"runtime_version"]);
+    NSString *proxyVersion = CPString(self.statusSnapshot[@"proxy_version"]);
+    if (!proxyVersion.length) {
+        proxyVersion = CPString(self.statusSnapshot[@"version"]);
+    }
+    BOOL knownMismatch = NO;
+    if (frontend.length && bundle.length && ![frontend isEqualToString:bundle]) {
+        knownMismatch = YES;
+    }
+    if (bundle.length && runtime.length && ![bundle isEqualToString:runtime]) {
+        knownMismatch = YES;
+    }
+    if (bundle.length && proxyVersion.length && ![bundle isEqualToString:proxyVersion]) {
+        knownMismatch = YES;
+    }
+    BOOL manifestKnownFailed = self.statusSnapshot[@"manifest_ok"] && !CPBool(self.statusSnapshot[@"manifest_ok"]);
+    return knownMismatch || manifestKnownFailed || CPBool(self.statusSnapshot[@"version_mismatch"]);
+}
+
+- (BOOL)shouldShowTokenHistoryWarning {
+    if (!CPBool(self.statusSnapshot[@"running"])) {
+        return NO;
+    }
+    if (!self.statusSnapshot[@"token_usage_events_available"]) {
+        return NO;
+    }
+    return !CPBool(self.statusSnapshot[@"token_usage_events_available"]);
+}
+
+- (NSView *)tokenHistoryWarningCard {
+    NSView *card = [self cardViewWithBackground:[[NSColor systemOrangeColor] colorWithAlphaComponent:0.10]];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.spacing = 6;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:stack];
+    [self pinView:stack toView:card insets:NSEdgeInsetsMake(10, 12, 10, 12)];
+    [stack addArrangedSubview:[self labelWithText:@"后台未同步" font:[NSFont systemFontOfSize:14 weight:NSFontWeightBold] color:NSColor.systemOrangeColor]];
+    [stack addArrangedSubview:[self emptyStateLabel:@"Token 历史事件接口不可用，历史列表和图表可能不完整。请点击“启动/修复/更新后台”或“应用更新”。"]];
+    return card;
+}
+
+- (NSView *)versionMismatchCard {
+    NSView *card = [self cardViewWithBackground:[[NSColor systemOrangeColor] colorWithAlphaComponent:0.12]];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.spacing = 8;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:stack];
+    [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 12, 12)];
+    [stack addArrangedSubview:[self labelWithText:@"版本不同步" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.systemOrangeColor]];
+    [stack addArrangedSubview:[self emptyStateLabel:@"后台或运行目录已经更新，但当前前台窗口可能仍是旧版本。请退出并重新打开小腊肠。"]];
+    [stack addArrangedSubview:[self versionDiagnosticsGridCompact:YES]];
+    return card;
 }
 
 - (NSView *)setupChecklistCard {
@@ -688,12 +985,128 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (NSArray<NSDictionary *> *)tokenUsageRows {
-    NSString *key = self.tokenUsageMode == 1 ? @"weekly" : @"daily";
-    return CPArray(self.tokenUsageSnapshot[key]);
+    return CPArray(self.tokenUsageSnapshot[@"daily"]);
+}
+
+- (NSArray<NSDictionary *> *)tokenUsageWeeklyRows {
+    NSArray *daily = [self tokenUsageRows];
+    NSArray<NSString *> *keys = @[
+        @"input_tokens",
+        @"output_tokens",
+        @"reasoning_tokens",
+        @"cached_tokens",
+        @"cache_tokens",
+        @"cache_read_tokens",
+        @"cache_creation_tokens",
+        @"total_tokens",
+        @"requests",
+        @"unknown_requests",
+    ];
+    NSInteger leading = daily.count ? CPWeekdayIndexForDateString(CPString(daily.firstObject[@"date"])) : 0;
+    NSMutableDictionary<NSNumber *, NSMutableDictionary *> *totalsByColumn = [NSMutableDictionary dictionary];
+    for (NSInteger i = 0; i < daily.count; i++) {
+        NSDictionary *day = daily[i];
+        NSInteger column = (leading + i) / 7;
+        NSNumber *columnKey = @(column);
+        NSMutableDictionary *total = totalsByColumn[columnKey];
+        if (!total) {
+            total = [NSMutableDictionary dictionary];
+            for (NSString *key in keys) {
+                total[key] = @0;
+            }
+            NSString *date = CPString(day[@"date"]);
+            total[@"week_start"] = date;
+            totalsByColumn[columnKey] = total;
+        }
+        NSString *date = CPString(day[@"date"]);
+        if (date.length) {
+            total[@"week_end"] = date;
+        }
+        for (NSString *key in keys) {
+            total[key] = @(CPDouble(total[key]) + CPDouble(day[key]));
+        }
+    }
+    NSMutableArray<NSDictionary *> *rows = [NSMutableArray arrayWithCapacity:daily.count];
+    for (NSInteger i = 0; i < daily.count; i++) {
+        NSDictionary *day = daily[i];
+        NSMutableDictionary *next = [day mutableCopy];
+        NSInteger column = (leading + i) / 7;
+        NSDictionary *week = totalsByColumn[@(column)];
+        for (NSString *key in keys) {
+            next[key] = @(CPDouble(week[key]));
+        }
+        NSString *weekStart = CPString(week[@"week_start"]);
+        NSString *weekEnd = CPString(week[@"week_end"]);
+        if (weekStart.length) {
+            next[@"week_start"] = weekStart;
+            next[@"period_label"] = weekEnd.length && ![weekEnd isEqualToString:weekStart]
+                ? [NSString stringWithFormat:@"%@ 至 %@", weekStart, weekEnd]
+                : weekStart;
+        }
+        [rows addObject:next];
+    }
+    return rows;
+}
+
+- (NSArray<NSDictionary *> *)tokenUsageBarRows {
+    NSArray *daily = [self tokenUsageRows];
+    if (daily.count <= 31) {
+        return daily;
+    }
+    return [daily subarrayWithRange:NSMakeRange(daily.count - 31, 31)];
+}
+
+- (NSArray<NSDictionary *> *)tokenUsageCumulativeRows {
+    NSArray *daily = [self tokenUsageRows];
+    NSMutableArray<NSDictionary *> *rows = [NSMutableArray arrayWithCapacity:daily.count];
+    NSArray<NSString *> *keys = @[
+        @"input_tokens",
+        @"output_tokens",
+        @"reasoning_tokens",
+        @"cached_tokens",
+        @"cache_tokens",
+        @"cache_read_tokens",
+        @"cache_creation_tokens",
+        @"total_tokens",
+        @"requests",
+        @"unknown_requests",
+    ];
+    NSMutableDictionary *running = [NSMutableDictionary dictionary];
+    for (NSString *key in keys) {
+        running[key] = @0;
+    }
+    for (NSDictionary *row in daily) {
+        NSMutableDictionary *next = [row mutableCopy];
+        NSString *date = CPString(row[@"date"]);
+        for (NSString *key in keys) {
+            double value = CPDouble(running[key]) + CPDouble(row[key]);
+            running[key] = @(value);
+            next[key] = @(value);
+        }
+        if (date.length) {
+            next[@"period_label"] = [NSString stringWithFormat:@"截至 %@", date];
+        }
+        [rows addObject:next];
+    }
+    return rows;
+}
+
+- (NSArray<NSDictionary *> *)tokenUsageHeatmapRows {
+    if (self.tokenUsageMode == 1) {
+        return [self tokenUsageWeeklyRows];
+    }
+    if (self.tokenUsageMode == 2) {
+        return [self tokenUsageCumulativeRows];
+    }
+    return [self tokenUsageRows];
 }
 
 - (NSDictionary *)tokenUsageTotal {
     return CPDict(self.tokenUsageSnapshot[@"total"]);
+}
+
+- (NSArray<NSDictionary *> *)tokenUsageEventRows {
+    return CPArray(self.tokenUsageEvents);
 }
 
 - (NSString *)formatTokenCount:(double)value {
@@ -737,20 +1150,21 @@ static NSString *CPRelativeTime(id epochValue) {
         remain7d += [self quotaRemainingForAccountName:name weekly:YES];
     }
     double capacity = quotaAccounts * 100.0;
-    double averageRemain = capacity > 0 ? ((remain5h + remain7d) / 2.0) / capacity : 0;
+    double remain5hRatio = capacity > 0 ? remain5h / capacity : 0;
+    double remain7dRatio = capacity > 0 ? remain7d / capacity : 0;
 
-    CPQuotaRingView *ring = [[CPQuotaRingView alloc] init];
-    ring.translatesAutoresizingMaskIntoConstraints = NO;
-    ring.progress = averageRemain;
-    ring.centerText = capacity > 0 ? [NSString stringWithFormat:@"%.0f%%", averageRemain * 100] : @"-";
-    [ring.widthAnchor constraintEqualToConstant:96].active = YES;
-    [ring.heightAnchor constraintEqualToConstant:96].active = YES;
-    [stack addArrangedSubview:ring];
+    NSStackView *rings = [[NSStackView alloc] init];
+    rings.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    rings.alignment = NSLayoutAttributeCenterY;
+    rings.spacing = 10;
+    [rings addArrangedSubview:[self quotaRingWithTitle:@"5h" progress:remain5hRatio color:NSColor.controlAccentColor]];
+    [rings addArrangedSubview:[self quotaRingWithTitle:@"7d" progress:remain7dRatio color:NSColor.systemGreenColor]];
+    [stack addArrangedSubview:rings];
 
     NSStackView *labels = [[NSStackView alloc] init];
     labels.orientation = NSUserInterfaceLayoutOrientationVertical;
     labels.spacing = 7;
-    [labels addArrangedSubview:[self labelWithText:@"总额度" font:[NSFont systemFontOfSize:17 weight:NSFontWeightBold] color:NSColor.labelColor]];
+    [labels addArrangedSubview:[self labelWithText:@"账号额度" font:[NSFont systemFontOfSize:17 weight:NSFontWeightBold] color:NSColor.labelColor]];
     [labels addArrangedSubview:[self labelWithText:[NSString stringWithFormat:@"总容量 %.0f%% · %@ 个账号", capacity, @(quotaAccounts)] font:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor]];
     [labels addArrangedSubview:[self quotaSummaryLineWithTitle:@"5h 剩余" value:remain5h color:NSColor.controlAccentColor capacity:capacity]];
     [labels addArrangedSubview:[self quotaSummaryLineWithTitle:@"7d 剩余" value:remain7d color:NSColor.systemGreenColor capacity:capacity]];
@@ -761,17 +1175,41 @@ static NSString *CPRelativeTime(id epochValue) {
     return card;
 }
 
+- (NSView *)quotaRingWithTitle:(NSString *)title progress:(double)progress color:(NSColor *)color {
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.alignment = NSLayoutAttributeCenterX;
+    stack.spacing = 3;
+    CPQuotaRingView *ring = [[CPQuotaRingView alloc] init];
+    ring.translatesAutoresizingMaskIntoConstraints = NO;
+    ring.progress = progress;
+    ring.ringColor = color;
+    ring.centerText = [NSString stringWithFormat:@"%.0f%%", progress * 100];
+    [ring.widthAnchor constraintEqualToConstant:72].active = YES;
+    [ring.heightAnchor constraintEqualToConstant:72].active = YES;
+    [stack addArrangedSubview:ring];
+    [stack addArrangedSubview:[self labelWithText:title font:[NSFont systemFontOfSize:12 weight:NSFontWeightSemibold] color:color]];
+    return stack;
+}
+
 - (NSView *)quotaSummaryLineWithTitle:(NSString *)title value:(double)value color:(NSColor *)color capacity:(double)capacity {
     NSStackView *row = [[NSStackView alloc] init];
     row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     row.alignment = NSLayoutAttributeCenterY;
     row.spacing = 8;
     [row addArrangedSubview:[self labelWithText:title font:[NSFont systemFontOfSize:12 weight:NSFontWeightMedium] color:NSColor.secondaryLabelColor]];
-    NSTextField *valueLabel = [self labelWithText:[NSString stringWithFormat:@"%.0f%%", value] font:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold] color:color];
-    [valueLabel.widthAnchor constraintEqualToConstant:52].active = YES;
+    double percent = capacity > 0 ? (value / capacity) * 100.0 : 0;
+    NSTextField *valueLabel = [self labelWithText:[NSString stringWithFormat:@"%.0f%%", percent] font:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold] color:color];
+    [valueLabel.widthAnchor constraintEqualToConstant:42].active = YES;
     [row addArrangedSubview:valueLabel];
-    NSProgressIndicator *progress = [self progressWithValue:capacity > 0 ? (value / capacity) * 100.0 : 0];
+    NSProgressIndicator *progress = [self progressWithValue:percent];
     [row addArrangedSubview:progress];
+    NSString *detail = capacity > 0
+        ? [NSString stringWithFormat:@"%.0f%% / %.0f%%", value, capacity]
+        : @"暂无容量";
+    NSTextField *detailLabel = [self labelWithText:detail font:[NSFont systemFontOfSize:10 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor];
+    [detailLabel.widthAnchor constraintEqualToConstant:78].active = YES;
+    [row addArrangedSubview:detailLabel];
     return row;
 }
 
@@ -789,9 +1227,9 @@ static NSString *CPRelativeTime(id epochValue) {
     if (weekly.count) {
         weeklyTokens = CPDouble(weekly.lastObject[@"total_tokens"]);
     }
-    [row addArrangedSubview:[self metricCardWithTitle:@"今日 Token" value:[self formatTokenCount:todayTokens] detail:@"精确捕获" color:NSColor.controlAccentColor]];
-    [row addArrangedSubview:[self metricCardWithTitle:@"本周 Token" value:[self formatTokenCount:weeklyTokens] detail:@"精确捕获" color:NSColor.systemGreenColor]];
-    [row addArrangedSubview:[self metricCardWithTitle:@"未知请求" value:[NSString stringWithFormat:@"%.0f", CPDouble(total[@"unknown_requests"])] detail:@"无 usage" color:NSColor.systemOrangeColor]];
+    [row addArrangedSubview:[self metricCardWithTitle:@"今日 Token" value:[self formatTokenCount:todayTokens] detail:@"" color:NSColor.controlAccentColor]];
+    [row addArrangedSubview:[self metricCardWithTitle:@"本周 Token" value:[self formatTokenCount:weeklyTokens] detail:@"" color:NSColor.systemGreenColor]];
+    [row addArrangedSubview:[self metricCardWithTitle:@"请求数" value:[NSString stringWithFormat:@"%.0f", CPDouble(total[@"requests"])] detail:@"" color:NSColor.systemOrangeColor]];
     return row;
 }
 
@@ -801,34 +1239,23 @@ static NSString *CPRelativeTime(id epochValue) {
     [card.heightAnchor constraintEqualToConstant:150].active = YES;
     NSStackView *stack = [[NSStackView alloc] init];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    stack.spacing = 8;
+    stack.spacing = 4;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:stack];
-    [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 10, 12)];
+    [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 2, 12)];
 
     NSStackView *header = [[NSStackView alloc] init];
     header.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     header.alignment = NSLayoutAttributeCenterY;
-    [header addArrangedSubview:[self labelWithText:@"Token 消耗" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
+    [header addArrangedSubview:[self labelWithText:@"最近 31 天柱状图" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
     NSView *flex = [[NSView alloc] init];
     [header addArrangedSubview:flex];
-    NSSegmentedControl *control = [[NSSegmentedControl alloc] init];
-    control.segmentCount = 2;
-    [control setLabel:@"每日" forSegment:0];
-    [control setLabel:@"每周" forSegment:1];
-    control.selectedSegment = self.tokenUsageMode;
-    control.trackingMode = NSSegmentSwitchTrackingSelectOne;
-    control.target = self;
-    control.action = @selector(tokenUsageModeAction:);
-    control.controlSize = NSControlSizeSmall;
-    [control.widthAnchor constraintEqualToConstant:112].active = YES;
-    [header addArrangedSubview:control];
     [stack addArrangedSubview:header];
 
     CPBarChartView *chart = [[CPBarChartView alloc] init];
-    chart.rows = [self tokenUsageRows];
+    chart.rows = [self tokenUsageBarRows];
     chart.translatesAutoresizingMaskIntoConstraints = NO;
-    [chart.heightAnchor constraintEqualToConstant:88].active = YES;
+    [chart.heightAnchor constraintEqualToConstant:110].active = YES;
     [stack addArrangedSubview:chart];
     return card;
 }
@@ -836,30 +1263,86 @@ static NSString *CPRelativeTime(id epochValue) {
 - (NSView *)tokenHeatmapCard {
     NSView *card = [self cardViewWithBackground:NSColor.textBackgroundColor];
     card.translatesAutoresizingMaskIntoConstraints = NO;
-    [card.heightAnchor constraintEqualToConstant:138].active = YES;
+    [card.heightAnchor constraintEqualToConstant:136].active = YES;
     NSStackView *stack = [[NSStackView alloc] init];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    stack.spacing = 6;
+    stack.spacing = 3;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:stack];
-    [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 10, 12)];
+    [self pinView:stack toView:card insets:NSEdgeInsetsMake(10, 12, 3, 12)];
 
-    NSDictionary *total = [self tokenUsageTotal];
     NSStackView *header = [[NSStackView alloc] init];
     header.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     header.alignment = NSLayoutAttributeCenterY;
     [header addArrangedSubview:[self labelWithText:@"Token 活动" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
     NSView *flex = [[NSView alloc] init];
     [header addArrangedSubview:flex];
-    [header addArrangedSubview:[self labelWithText:[NSString stringWithFormat:@"总量 %@ tokens", [self formatTokenCount:CPDouble(total[@"total_tokens"])]] font:[NSFont systemFontOfSize:12 weight:NSFontWeightSemibold] color:NSColor.secondaryLabelColor]];
+    NSSegmentedControl *control = [[NSSegmentedControl alloc] init];
+    control.segmentCount = 3;
+    [control setLabel:@"每日" forSegment:0];
+    [control setLabel:@"每周" forSegment:1];
+    [control setLabel:@"累计" forSegment:2];
+    control.trackingMode = NSSegmentSwitchTrackingSelectOne;
+    control.selectedSegment = MAX(0, MIN(2, self.tokenUsageMode));
+    control.target = self;
+    control.action = @selector(tokenUsageModeAction:);
+    control.controlSize = NSControlSizeSmall;
+    control.translatesAutoresizingMaskIntoConstraints = NO;
+    [control.widthAnchor constraintEqualToConstant:160].active = YES;
+    [header addArrangedSubview:control];
     [stack addArrangedSubview:header];
 
     CPHeatmapView *heatmap = [[CPHeatmapView alloc] init];
-    heatmap.rows = [self tokenUsageRows];
+    heatmap.rows = [self tokenUsageHeatmapRows];
     heatmap.translatesAutoresizingMaskIntoConstraints = NO;
-    [heatmap.heightAnchor constraintEqualToConstant:84].active = YES;
+    [heatmap.heightAnchor constraintEqualToConstant:94].active = YES;
     [stack addArrangedSubview:heatmap];
     return card;
+}
+
+- (NSView *)tokenEventHeaderRow {
+    NSStackView *row = [[NSStackView alloc] init];
+    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row.alignment = NSLayoutAttributeCenterY;
+    row.spacing = 8;
+    NSArray *titles = @[@"时间", @"账号", @"模型", @"状态", @"Token"];
+    NSArray *widths = @[@70, @72, @88, @42, @58];
+    for (NSUInteger i = 0; i < titles.count; i++) {
+        NSTextField *label = [self labelWithText:titles[i] font:[NSFont systemFontOfSize:10 weight:NSFontWeightMedium] color:NSColor.secondaryLabelColor];
+        [label.widthAnchor constraintEqualToConstant:CPDouble(widths[i])].active = YES;
+        [row addArrangedSubview:label];
+    }
+    return row;
+}
+
+- (NSView *)tokenEventRow:(NSDictionary *)event {
+    NSStackView *row = [[NSStackView alloc] init];
+    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row.alignment = NSLayoutAttributeCenterY;
+    row.spacing = 8;
+    NSString *status = CPDisplayString(event[@"status"]);
+    if ([status isEqualToString:@"-"] && CPBool(event[@"failed"])) {
+        status = @"失败";
+    }
+    NSArray *values = @[
+        CPRelativeTime(event[@"at"]),
+        CPDisplayString(event[@"account"]),
+        CPDisplayString(event[@"model"]),
+        status,
+        [self formatTokenCount:CPDouble(event[@"total_tokens"])],
+    ];
+    NSArray *widths = @[@70, @72, @88, @42, @58];
+    for (NSUInteger i = 0; i < values.count; i++) {
+        NSColor *color = i == 4 ? NSColor.controlAccentColor : NSColor.labelColor;
+        if (i == 3 && ([status integerValue] >= 400 || [status isEqualToString:@"失败"])) {
+            color = NSColor.systemOrangeColor;
+        }
+        NSTextField *label = [self labelWithText:values[i] font:[NSFont systemFontOfSize:11 weight:i == 4 ? NSFontWeightSemibold : NSFontWeightRegular] color:color];
+        label.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        [label.widthAnchor constraintEqualToConstant:CPDouble(widths[i])].active = YES;
+        [row addArrangedSubview:label];
+    }
+    return row;
 }
 
 - (NSString *)strategyTitleForValue:(NSString *)value {
@@ -1287,6 +1770,43 @@ static NSString *CPRelativeTime(id epochValue) {
     return card;
 }
 
+- (NSView *)updateDiagnosticsCard {
+    NSView *card = [self cardView];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.spacing = 8;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:stack];
+    [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 12, 12)];
+    [stack addArrangedSubview:[self labelWithText:@"更新诊断" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
+    [stack addArrangedSubview:[self versionDiagnosticsGridCompact:NO]];
+    NSString *manifestError = CPString(self.statusSnapshot[@"manifest_error"]);
+    if (manifestError.length) {
+        [stack addArrangedSubview:[self emptyStateLabel:manifestError]];
+    }
+    return card;
+}
+
+- (NSView *)versionDiagnosticsGridCompact:(BOOL)compact {
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.spacing = compact ? 4 : 6;
+    NSString *proxyVersion = CPString(self.statusSnapshot[@"proxy_version"]);
+    if (!proxyVersion.length) {
+        proxyVersion = CPString(self.statusSnapshot[@"version"]);
+    }
+    [stack addArrangedSubview:[self infoRowWithTitle:@"前台版本" value:CPDisplayString(self.frontendVersion)]];
+    [stack addArrangedSubview:[self infoRowWithTitle:@"内置版本" value:CPDisplayString(self.statusSnapshot[@"bundle_version"])]];
+    [stack addArrangedSubview:[self infoRowWithTitle:@"运行版本" value:CPDisplayString(self.statusSnapshot[@"runtime_version"])]];
+    [stack addArrangedSubview:[self infoRowWithTitle:@"后台版本" value:CPDisplayString(proxyVersion)]];
+    [stack addArrangedSubview:[self infoRowWithTitle:@"Manifest" value:CPBool(self.statusSnapshot[@"manifest_ok"]) ? @"一致" : @"需检查"]];
+    if (!compact) {
+        [stack addArrangedSubview:[self infoRowWithTitle:@"LaunchAgent" value:CPDisplayString(self.statusSnapshot[@"installed_program"])]];
+    }
+    return stack;
+}
+
 - (NSView *)diagnosticsCard {
     NSView *card = [self cardView];
     card.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1636,15 +2156,20 @@ static NSString *CPRelativeTime(id epochValue) {
 
     NSTextField *titleLabel = [self labelWithText:title font:[NSFont systemFontOfSize:10 weight:NSFontWeightMedium] color:NSColor.secondaryLabelColor];
     NSTextField *valueLabel = [self labelWithText:value ?: @"-" font:[NSFont systemFontOfSize:20 weight:NSFontWeightBold] color:color ?: NSColor.labelColor];
-    NSTextField *detailLabel = [self labelWithText:detail ?: @"" font:[NSFont systemFontOfSize:10 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor];
-    for (NSTextField *label in @[titleLabel, valueLabel, detailLabel]) {
+    BOOL hasDetail = detail.length > 0;
+    NSTextField *detailLabel = hasDetail ? [self labelWithText:detail font:[NSFont systemFontOfSize:10 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor] : nil;
+    NSMutableArray<NSTextField *> *labels = [@[titleLabel, valueLabel] mutableCopy];
+    if (detailLabel) {
+        [labels addObject:detailLabel];
+    }
+    for (NSTextField *label in labels) {
         label.alignment = NSTextAlignmentCenter;
         label.maximumNumberOfLines = 1;
         label.lineBreakMode = NSLineBreakByTruncatingTail;
         [label setContentCompressionResistancePriority:NSLayoutPriorityDefaultHigh forOrientation:NSLayoutConstraintOrientationVertical];
         [card addSubview:label];
     }
-    [NSLayoutConstraint activateConstraints:@[
+    NSMutableArray<NSLayoutConstraint *> *constraints = [@[
         [titleLabel.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:6],
         [titleLabel.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-6],
         [titleLabel.topAnchor constraintEqualToAnchor:card.topAnchor constant:10],
@@ -1654,12 +2179,16 @@ static NSString *CPRelativeTime(id epochValue) {
         [valueLabel.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-4],
         [valueLabel.centerYAnchor constraintEqualToAnchor:card.centerYAnchor constant:0],
         [valueLabel.heightAnchor constraintEqualToConstant:30],
-
-        [detailLabel.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:6],
-        [detailLabel.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-6],
-        [detailLabel.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-9],
-        [detailLabel.heightAnchor constraintEqualToConstant:16],
-    ]];
+    ] mutableCopy];
+    if (detailLabel) {
+        [constraints addObjectsFromArray:@[
+            [detailLabel.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:6],
+            [detailLabel.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-6],
+            [detailLabel.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-9],
+            [detailLabel.heightAnchor constraintEqualToConstant:16],
+        ]];
+    }
+    [NSLayoutConstraint activateConstraints:constraints];
     return card;
 }
 
@@ -1748,7 +2277,12 @@ static NSString *CPRelativeTime(id epochValue) {
         NSArray *accounts = @[];
         NSDictionary *quota = @{};
         NSDictionary *tokenUsage = @{};
+        NSDictionary *quotaRefreshResult = nil;
         if (proxyOnline) {
+            id refreshResult = [self fetchJSONPath:@"/api/quota/refresh" method:@"POST" timeout:12.0];
+            if ([refreshResult isKindOfClass:NSDictionary.class]) {
+                quotaRefreshResult = refreshResult;
+            }
             id remoteAccounts = [self fetchJSONPath:@"/api/accounts" method:@"GET" timeout:2.0];
             if ([remoteAccounts isKindOfClass:NSArray.class]) {
                 accounts = remoteAccounts;
@@ -1757,7 +2291,7 @@ static NSString *CPRelativeTime(id epochValue) {
             if ([remoteQuota isKindOfClass:NSDictionary.class]) {
                 quota = remoteQuota;
             }
-            id remoteTokenUsage = [self fetchJSONPath:@"/api/token-usage" method:@"GET" timeout:2.0];
+            id remoteTokenUsage = [self fetchJSONPath:@"/api/token-usage?daily_days=371" method:@"GET" timeout:2.0];
             if ([remoteTokenUsage isKindOfClass:NSDictionary.class]) {
                 tokenUsage = remoteTokenUsage;
             }
@@ -1783,73 +2317,30 @@ static NSString *CPRelativeTime(id epochValue) {
             }
             [self updateStatusViews];
             [self renderActiveSection];
-            [self setBusy:NO message:@"状态已刷新"];
-        });
-    });
-}
-
-- (void)refreshQuotaAction:(id)sender {
-    if (!CPBool(self.statusSnapshot[@"running"])) {
-        [self appendLog:@"代理离线，无法主动刷新远端额度；已显示本地账号状态。"];
-        self.footerStatusLabel.stringValue = @"代理离线，无法刷新额度";
-        return;
-    }
-    [self setBusy:YES message:@"正在刷新额度..."];
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSDictionary *result = [self fetchJSONPath:@"/api/quota/refresh" method:@"POST" timeout:12.0];
-        NSDictionary *localStatus = [self runPythonJSONSync:@[@"status"] rawText:nil];
-        id remoteStatus = [self fetchJSONPath:@"/api/status" method:@"GET" timeout:2.0];
-        id remoteAccounts = [self fetchJSONPath:@"/api/accounts" method:@"GET" timeout:2.0];
-        id remoteQuota = [self fetchJSONPath:@"/api/quota" method:@"GET" timeout:2.0];
-        id remoteTokenUsage = [self fetchJSONPath:@"/api/token-usage" method:@"GET" timeout:2.0];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSDictionary *accounts = CPDict(result[@"accounts"]);
-            NSInteger refreshed = 0;
-            NSInteger failed = 0;
-            for (id key in accounts) {
-                NSDictionary *item = CPDict(accounts[key]);
-                if (CPBool(item[@"refreshed"])) {
-                    refreshed += 1;
-                } else {
-                    failed += 1;
-                }
-            }
-            NSString *message = result
-                ? [NSString stringWithFormat:@"额度刷新完成：%ld 成功 / %ld 失败", (long)refreshed, (long)failed]
-                : @"额度刷新失败：代理无响应或请求超时";
-            [self appendLog:[NSString stringWithFormat:@"刷新额度\n%@", CPPrettyJSON(result ?: @{@"error": @"request failed"})]];
-            NSMutableDictionary *mergedStatus = [localStatus isKindOfClass:NSDictionary.class] ? [localStatus mutableCopy] : [self.statusSnapshot mutableCopy];
-            if ([remoteStatus isKindOfClass:NSDictionary.class]) {
-                [mergedStatus addEntriesFromDictionary:remoteStatus];
-            }
-            if (mergedStatus.count) {
-                self.statusSnapshot = mergedStatus;
-            }
-            if ([remoteAccounts isKindOfClass:NSArray.class]) {
-                self.accounts = remoteAccounts;
-            }
-            if ([remoteQuota isKindOfClass:NSDictionary.class]) {
-                self.quotaSnapshot = remoteQuota;
-            }
-            if ([remoteTokenUsage isKindOfClass:NSDictionary.class]) {
-                self.tokenUsageSnapshot = remoteTokenUsage;
-            }
-            [self updateStatusViews];
-            [self renderActiveSection];
+            NSString *message = proxyOnline
+                ? (quotaRefreshResult ? @"状态和额度已刷新" : @"状态已刷新，额度刷新失败")
+                : @"状态已刷新";
             [self setBusy:NO message:message];
         });
     });
 }
 
+- (void)refreshQuotaAction:(id)sender {
+    [self refreshSnapshots:sender];
+}
+
 - (void)updateStatusViews {
     BOOL running = CPBool(self.statusSnapshot[@"running"]);
     NSString *online = running ? @"代理在线" : @"代理离线";
+    if ([self hasVersionMismatch]) {
+        online = @"版本不同步";
+    }
     NSString *accounts = [NSString stringWithFormat:@"%@/%@ 可用",
                           CPDisplayString(self.statusSnapshot[@"active_accounts"]),
                           CPDisplayString(self.statusSnapshot[@"total_accounts"])];
     self.subtitleLabel.stringValue = [NSString stringWithFormat:@"%@ · %@ · %@", online, accounts, [self codexModeDetail]];
     self.sidebarStatusLabel.stringValue = [NSString stringWithFormat:@"%@ · %@/%@ 可用",
-                                           running ? @"在线" : @"离线",
+                                           [self hasVersionMismatch] ? @"需重开" : (running ? @"在线" : @"离线"),
                                            CPDisplayString(self.statusSnapshot[@"active_accounts"]),
                                            CPDisplayString(self.statusSnapshot[@"total_accounts"])];
 }
@@ -1865,6 +2356,9 @@ static NSString *CPRelativeTime(id epochValue) {
     self.titleLabel.stringValue = pair[0];
     BOOL running = CPBool(self.statusSnapshot[@"running"]);
     NSString *state = running ? @"代理在线" : @"代理离线";
+    if ([self hasVersionMismatch]) {
+        state = @"版本不同步";
+    }
     self.subtitleLabel.stringValue = [NSString stringWithFormat:@"%@ · %@", state, pair[1]];
 }
 
@@ -1976,7 +2470,7 @@ static NSString *CPRelativeTime(id epochValue) {
 }
 
 - (void)tokenUsageModeAction:(NSSegmentedControl *)sender {
-    self.tokenUsageMode = sender.selectedSegment == 1 ? 1 : 0;
+    self.tokenUsageMode = MAX(0, MIN(2, sender.selectedSegment));
     [self renderActiveSection];
 }
 
@@ -2042,6 +2536,14 @@ static NSString *CPRelativeTime(id epochValue) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [self appendLog:body];
             [self setBusy:NO message:@"应用更新已完成"];
+            if (CPBool(result[@"frontend_restart_required"])) {
+                NSString *version = CPDisplayString(result[@"expected_version"]);
+                NSAlert *done = [[NSAlert alloc] init];
+                done.messageText = @"后台已更新";
+                done.informativeText = [NSString stringWithFormat:@"后台已更新到 %@，需要退出并重新打开小腊肠以显示新版界面。", version];
+                [done addButtonWithTitle:@"知道了"];
+                [done runModal];
+            }
             [self refreshSnapshots:nil];
         });
     });

@@ -272,6 +272,22 @@ def _extract_session_key(headers: dict, body: bytes) -> str:
     return ""
 
 
+def _extract_request_model(body: bytes) -> str:
+    if not body:
+        return ""
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("model", "requested_model", "requestedModel"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
 def _public_session_key(session_key: str) -> str:
     if not session_key:
         return ""
@@ -398,7 +414,19 @@ def _should_stream_response(path: str, upstream_resp: aiohttp.ClientResponse) ->
     return _is_streaming_response(upstream_resp)
 
 
-def _record_token_usage(path: str, request_id: str, account, usage: Optional[dict]) -> None:
+def _record_token_usage(
+    path: str,
+    request_id: str,
+    account,
+    usage: Optional[dict],
+    *,
+    method: str = "",
+    model: str = "",
+    status: Optional[int] = None,
+    failed: bool = False,
+    latency_ms: Optional[float] = None,
+    ttft_ms: Optional[float] = None,
+) -> None:
     if not _is_codex_responses_path(path):
         return
     record_request_usage(
@@ -406,6 +434,13 @@ def _record_token_usage(path: str, request_id: str, account, usage: Optional[dic
         account=getattr(account, "name", ""),
         path=path,
         usage=usage,
+        method=method,
+        model=model,
+        status=status,
+        failed=failed,
+        latency_ms=latency_ms,
+        ttft_ms=ttft_ms,
+        requested_model=model,
     )
 
 
@@ -661,6 +696,7 @@ async def _relay_realtime_stream(
     cooldown: int,
     session_key: str = "",
     affinity_hit: Optional[bool] = None,
+    request_model: str = "",
 ) -> web.StreamResponse:
     resp = web.StreamResponse(
         status=upstream_resp.status,
@@ -719,7 +755,18 @@ async def _relay_realtime_stream(
             stream_keepalive_count=keepalive_count,
         )
         if usage_collector:
-            _record_token_usage(path, request_id, account, usage_collector.finish())
+            _record_token_usage(
+                path,
+                request_id,
+                account,
+                usage_collector.finish(),
+                method=request.method,
+                model=request_model,
+                status=upstream_resp.status,
+                failed=not (200 <= upstream_resp.status < 400),
+                latency_ms=duration_ms,
+                ttft_ms=first_byte_ms,
+            )
         if completed:
             pool.bind_session(session_key, account)
 
@@ -1257,7 +1304,15 @@ async def _handle_codex_websocket(
             session_key=_public_session_key(session_key),
             affinity_hit=_public_affinity_hit(session_key, connected.affinity_hit),
         )
-        _record_token_usage(path, request_id, account, result.usage)
+        _record_token_usage(
+            path,
+            request_id,
+            account,
+            result.usage,
+            method=request.method,
+            status=101,
+            latency_ms=duration_ms,
+        )
         if result.completed:
             _clear_ws_stream_interruption_cooldown(pool, account)
             await _close_websocket_safely(client_ws, code=aiohttp.WSCloseCode.OK)
@@ -1392,6 +1447,7 @@ async def _handle_with_session(
             headers={"x-request-id": request_id},
         )
     session_key = _extract_session_key(dict(request.headers), body) if _is_codex_responses_path(path) else ""
+    request_model = _extract_request_model(body) if _is_codex_responses_path(path) else ""
     base_headers = _clean_headers(dict(request.headers))
     base_headers["accept-encoding"] = "identity"
 
@@ -1507,6 +1563,11 @@ async def _handle_with_session(
                                         request_id,
                                         account,
                                         extract_usage_from_bytes(payload),
+                                        method=request.method,
+                                        model=request_model,
+                                        status=upstream_resp.status,
+                                        failed=False,
+                                        latency_ms=duration_ms,
                                     )
                                 return web.Response(
                                     status=upstream_resp.status,
@@ -1566,7 +1627,17 @@ async def _handle_with_session(
                                     extract_usage_from_sse_bytes(buffered.body)
                                     or extract_usage_from_bytes(buffered.body)
                                 )
-                                _record_token_usage(path, request_id, account, usage)
+                                _record_token_usage(
+                                    path,
+                                    request_id,
+                                    account,
+                                    usage,
+                                    method=request.method,
+                                    model=request_model,
+                                    status=upstream_resp.status,
+                                    failed=not (200 <= upstream_resp.status < 400),
+                                    latency_ms=duration_ms,
+                                )
                                 pool.bind_session(session_key, account)
                                 return web.Response(
                                     status=upstream_resp.status,
@@ -1593,6 +1664,7 @@ async def _handle_with_session(
                                     stream_cooldown,
                                     session_key,
                                     affinity_hit,
+                                    request_model,
                                 )
                             except _RetryableStreamError as e:
                                 _record_attempt(
