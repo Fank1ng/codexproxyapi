@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.6.2 - 2026-06-12
+
+- Restyled the macOS control app with a hidden titlebar title, no top divider, and closed rounded sidebar panels.
+- Packaged the macOS release as XiaoLaChang 0.6.2.
+
 ## v0.6.0 - 2026-06-10
 
 - Hardened macOS update sync with staging validation, rollback, and update locking.

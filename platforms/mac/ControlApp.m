@@ -539,17 +539,19 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
     self.window = [[NSWindow alloc] initWithContentRect:frame
                                              styleMask:(NSWindowStyleMaskTitled |
                                                         NSWindowStyleMaskClosable |
-                                                        NSWindowStyleMaskMiniaturizable)
+                                                        NSWindowStyleMaskMiniaturizable |
+                                                        NSWindowStyleMaskFullSizeContentView)
                                                backing:NSBackingStoreBuffered
                                                  defer:NO];
-    self.window.title = @"小腊肠";
+    self.window.title = @"";
     self.window.contentMinSize = NSMakeSize(600, 460);
     self.window.contentMaxSize = NSMakeSize(600, 460);
     self.window.minSize = self.window.frame.size;
     self.window.maxSize = self.window.frame.size;
     self.window.delegate = self;
-    self.window.titlebarAppearsTransparent = NO;
-    self.window.movableByWindowBackground = NO;
+    self.window.titleVisibility = NSWindowTitleHidden;
+    self.window.titlebarAppearsTransparent = YES;
+    self.window.movableByWindowBackground = YES;
     [self.window center];
 
     CPThemedView *root = [[CPThemedView alloc] initWithFrame:frame];
@@ -558,10 +560,7 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
     root.cpBackgroundColor = NSColor.windowBackgroundColor;
     self.window.contentView = root;
 
-    NSVisualEffectView *sidebar = [[NSVisualEffectView alloc] init];
-    sidebar.material = NSVisualEffectMaterialSidebar;
-    sidebar.blendingMode = NSVisualEffectBlendingModeBehindWindow;
-    sidebar.state = NSVisualEffectStateActive;
+    NSView *sidebar = [[NSView alloc] init];
     sidebar.translatesAutoresizingMaskIntoConstraints = NO;
     [root addSubview:sidebar];
     [self buildSidebarInView:sidebar];
@@ -629,14 +628,34 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
 #pragma mark - Layout
 
 - (void)buildSidebarInView:(NSView *)sidebar {
+    CPThemedView *panel = [[CPThemedView alloc] init];
+    panel.translatesAutoresizingMaskIntoConstraints = NO;
+    panel.wantsLayer = YES;
+    panel.layer.cornerRadius = 14;
+    panel.layer.masksToBounds = NO;
+    panel.cpBackgroundColor = [NSColor.controlBackgroundColor colorWithAlphaComponent:0.62];
+    panel.cpBorderColor = [NSColor.separatorColor colorWithAlphaComponent:0.55];
+    panel.layer.borderWidth = 0.6;
+    panel.cpShadowColor = NSColor.blackColor;
+    panel.layer.shadowOpacity = 0.10;
+    panel.layer.shadowOffset = CGSizeMake(0, -1);
+    panel.layer.shadowRadius = 8;
+    [sidebar addSubview:panel];
+    [NSLayoutConstraint activateConstraints:@[
+        [panel.leadingAnchor constraintEqualToAnchor:sidebar.leadingAnchor constant:2],
+        [panel.trailingAnchor constraintEqualToAnchor:sidebar.trailingAnchor constant:-2],
+        [panel.topAnchor constraintEqualToAnchor:sidebar.topAnchor constant:8],
+        [panel.bottomAnchor constraintEqualToAnchor:sidebar.bottomAnchor constant:-8],
+    ]];
+
     self.sidebarStack = [[NSStackView alloc] init];
     self.sidebarStack.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.sidebarStack.alignment = NSLayoutAttributeLeading;
     self.sidebarStack.spacing = 6;
-    self.sidebarStack.edgeInsets = NSEdgeInsetsMake(16, 8, 10, 8);
+    self.sidebarStack.edgeInsets = NSEdgeInsetsMake(0, 0, 0, 0);
     self.sidebarStack.translatesAutoresizingMaskIntoConstraints = NO;
-    [sidebar addSubview:self.sidebarStack];
-    [self pinView:self.sidebarStack toView:sidebar insets:NSEdgeInsetsMake(16, 8, 12, 8)];
+    [panel addSubview:self.sidebarStack];
+    [self pinView:self.sidebarStack toView:panel insets:NSEdgeInsetsMake(44, 8, 12, 8)];
 
     [self addSpacerToStack:self.sidebarStack height:4];
 
@@ -659,9 +678,10 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
     [self.sidebarStack addArrangedSubview:flex];
     [flex.heightAnchor constraintGreaterThanOrEqualToConstant:90].active = YES;
 
-    NSView *statusCard = [self cardView];
+    NSView *statusCard = [self cardViewWithBackground:[NSColor.controlBackgroundColor colorWithAlphaComponent:0.78]];
     statusCard.translatesAutoresizingMaskIntoConstraints = NO;
-    [statusCard.widthAnchor constraintEqualToConstant:102].active = YES;
+    statusCard.layer.cornerRadius = 9;
+    [statusCard.widthAnchor constraintEqualToConstant:98].active = YES;
     [statusCard.heightAnchor constraintEqualToConstant:66].active = YES;
     NSStackView *statusStack = [[NSStackView alloc] init];
     statusStack.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -2029,12 +2049,12 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
 - (NSView *)cardViewWithBackground:(NSColor *)background {
     CPThemedView *view = [[CPThemedView alloc] init];
     view.wantsLayer = YES;
-    view.layer.cornerRadius = 8;
+    view.layer.cornerRadius = 10;
     view.cpBackgroundColor = background;
-    view.cpBorderColor = NSColor.separatorColor;
+    view.cpBorderColor = [NSColor.separatorColor colorWithAlphaComponent:0.55];
     view.layer.borderWidth = 0.5;
     view.cpShadowColor = NSColor.blackColor;
-    view.layer.shadowOpacity = 0.04;
+    view.layer.shadowOpacity = 0.05;
     view.layer.shadowOffset = CGSizeMake(0, -1);
     view.layer.shadowRadius = 4;
     return view;
@@ -2061,7 +2081,8 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
     button.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
     button.translatesAutoresizingMaskIntoConstraints = NO;
     button.wantsLayer = YES;
-    button.layer.cornerRadius = 7;
+    button.layer.cornerRadius = 9;
+    button.layer.masksToBounds = YES;
     NSImage *image = [self symbolImageNamed:symbol];
     if (image) {
         button.image = image;
@@ -3275,7 +3296,9 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
     for (NSButton *button in self.navButtons) {
         BOOL selected = button.tag >= 0 && button.tag < ids.count && [ids[button.tag] isEqualToString:self.activeSection];
         button.state = selected ? NSControlStateValueOn : NSControlStateValueOff;
-        button.layer.backgroundColor = selected ? [NSColor.selectedContentBackgroundColor colorWithAlphaComponent:0.16].CGColor : NSColor.clearColor.CGColor;
+        button.layer.backgroundColor = selected ? [NSColor.controlAccentColor colorWithAlphaComponent:0.22].CGColor : NSColor.clearColor.CGColor;
+        button.layer.borderWidth = selected ? 0.5 : 0;
+        button.layer.borderColor = selected ? [NSColor.controlAccentColor colorWithAlphaComponent:0.30].CGColor : NSColor.clearColor.CGColor;
         button.contentTintColor = selected ? NSColor.controlAccentColor : NSColor.labelColor;
     }
 }
