@@ -146,6 +146,42 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
             (long)unknown];
 }
 
+static BOOL CPIsDarkAppearance(NSAppearance *appearance) {
+    NSAppearance *effective = appearance ?: NSApp.effectiveAppearance;
+    NSString *match = [effective bestMatchFromAppearancesWithNames:@[
+        NSAppearanceNameAqua,
+        NSAppearanceNameDarkAqua,
+    ]];
+    return [match isEqualToString:NSAppearanceNameDarkAqua];
+}
+
+static NSColor *CPDynamicAquaColor(NSString *name, NSColor *lightColor, NSColor *darkColor) {
+    if (@available(macOS 10.15, *)) {
+        return [NSColor colorWithName:name dynamicProvider:^NSColor *(NSAppearance *appearance) {
+            return CPIsDarkAppearance(appearance) ? darkColor : lightColor;
+        }];
+    }
+    return CPIsDarkAppearance(NSApp.effectiveAppearance) ? darkColor : lightColor;
+}
+
+static NSColor *CPSidebarPanelBackgroundColor(void) {
+    return CPDynamicAquaColor(@"CPSidebarPanelBackgroundColor",
+                             [NSColor colorWithCalibratedWhite:0.98 alpha:0.86],
+                             [NSColor colorWithCalibratedWhite:0.12 alpha:0.78]);
+}
+
+static NSColor *CPSidebarCardBackgroundColor(void) {
+    return CPDynamicAquaColor(@"CPSidebarCardBackgroundColor",
+                             [NSColor colorWithCalibratedWhite:1.00 alpha:0.64],
+                             [NSColor colorWithCalibratedWhite:0.08 alpha:0.78]);
+}
+
+static NSColor *CPSidebarBorderColor(void) {
+    return CPDynamicAquaColor(@"CPSidebarBorderColor",
+                             [NSColor colorWithCalibratedWhite:0.00 alpha:0.18],
+                             [NSColor colorWithCalibratedWhite:1.00 alpha:0.16]);
+}
+
 @interface ControlWindowController : NSObject <NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) NSSplitView *splitView;
@@ -581,6 +617,11 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
     ]];
 
     [self.window makeKeyAndOrderFront:nil];
+    [self.window.contentView layoutSubtreeIfNeeded];
+    [self positionTrafficLightButtons];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self positionTrafficLightButtons];
+    });
     [NSApp activateIgnoringOtherApps:YES];
     [self appendLog:@"控制台已启动。原生 App 会优先读取本地代理 API，代理离线时回退到本地账号扫描。"];
     [NSDistributedNotificationCenter.defaultCenter addObserver:self
@@ -622,10 +663,35 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
     dispatch_async(dispatch_get_main_queue(), ^{
         [self updateNavigationSelection];
         [self renderActiveSection];
+        [self positionTrafficLightButtons];
     });
 }
 
 #pragma mark - Layout
+
+- (void)positionTrafficLightButtons {
+    NSButton *closeButton = [self.window standardWindowButton:NSWindowCloseButton];
+    NSButton *miniaturizeButton = [self.window standardWindowButton:NSWindowMiniaturizeButton];
+    NSButton *zoomButton = [self.window standardWindowButton:NSWindowZoomButton];
+    if (!closeButton || !miniaturizeButton || !zoomButton || !self.toolbarStack) {
+        return;
+    }
+    NSView *buttonSuperview = closeButton.superview;
+    if (!buttonSuperview) {
+        return;
+    }
+    [self.window.contentView layoutSubtreeIfNeeded];
+    [self.toolbarStack layoutSubtreeIfNeeded];
+    NSPoint toolbarCenter = NSMakePoint(NSMidX(self.toolbarStack.bounds), NSMidY(self.toolbarStack.bounds));
+    NSPoint windowPoint = [self.toolbarStack convertPoint:toolbarCenter toView:nil];
+    NSPoint targetPoint = [buttonSuperview convertPoint:windowPoint fromView:nil];
+    CGFloat targetCenterY = targetPoint.y;
+    for (NSButton *button in @[closeButton, miniaturizeButton, zoomButton]) {
+        NSRect frame = button.frame;
+        frame.origin.y = round(targetCenterY - (frame.size.height / 2.0));
+        button.frame = frame;
+    }
+}
 
 - (void)buildSidebarInView:(NSView *)sidebar {
     CPThemedView *panel = [[CPThemedView alloc] init];
@@ -633,19 +699,19 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
     panel.wantsLayer = YES;
     panel.layer.cornerRadius = 14;
     panel.layer.masksToBounds = NO;
-    panel.cpBackgroundColor = [NSColor.controlBackgroundColor colorWithAlphaComponent:0.62];
-    panel.cpBorderColor = [NSColor.separatorColor colorWithAlphaComponent:0.55];
+    panel.cpBackgroundColor = CPSidebarPanelBackgroundColor();
+    panel.cpBorderColor = CPSidebarBorderColor();
     panel.layer.borderWidth = 0.6;
     panel.cpShadowColor = NSColor.blackColor;
-    panel.layer.shadowOpacity = 0.10;
+    panel.layer.shadowOpacity = 0.08;
     panel.layer.shadowOffset = CGSizeMake(0, -1);
     panel.layer.shadowRadius = 8;
     [sidebar addSubview:panel];
     [NSLayoutConstraint activateConstraints:@[
         [panel.leadingAnchor constraintEqualToAnchor:sidebar.leadingAnchor constant:2],
         [panel.trailingAnchor constraintEqualToAnchor:sidebar.trailingAnchor constant:-2],
-        [panel.topAnchor constraintEqualToAnchor:sidebar.topAnchor constant:8],
-        [panel.bottomAnchor constraintEqualToAnchor:sidebar.bottomAnchor constant:-8],
+        [panel.topAnchor constraintEqualToAnchor:sidebar.topAnchor constant:2],
+        [panel.bottomAnchor constraintEqualToAnchor:sidebar.bottomAnchor constant:-2],
     ]];
 
     self.sidebarStack = [[NSStackView alloc] init];
@@ -678,7 +744,7 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
     [self.sidebarStack addArrangedSubview:flex];
     [flex.heightAnchor constraintGreaterThanOrEqualToConstant:90].active = YES;
 
-    NSView *statusCard = [self cardViewWithBackground:[NSColor.controlBackgroundColor colorWithAlphaComponent:0.78]];
+    NSView *statusCard = [self cardViewWithBackground:CPSidebarCardBackgroundColor()];
     statusCard.translatesAutoresizingMaskIntoConstraints = NO;
     statusCard.layer.cornerRadius = 9;
     [statusCard.widthAnchor constraintEqualToConstant:98].active = YES;
@@ -742,7 +808,8 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
 
     NSScrollView *scroll = [[NSScrollView alloc] init];
     scroll.drawsBackground = NO;
-    scroll.hasVerticalScroller = YES;
+    scroll.hasVerticalScroller = NO;
+    scroll.autohidesScrollers = YES;
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
 
     self.contentStack = [[CPFlippedStackView alloc] init];
@@ -756,10 +823,6 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
 
     [rootStack addArrangedSubview:scroll];
     [scroll.heightAnchor constraintGreaterThanOrEqualToConstant:300].active = YES;
-
-    self.footerStatusLabel = [self labelWithText:@"就绪" font:[NSFont systemFontOfSize:11 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor];
-    [self.footerStatusLabel setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationVertical];
-    [rootStack addArrangedSubview:self.footerStatusLabel];
 
     [self renderActiveSection];
 }

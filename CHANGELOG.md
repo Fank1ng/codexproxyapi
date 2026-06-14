@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.6.3 - 2026-06-14
+
+- Refined the macOS control app sidebar for light appearance with native-feeling dynamic colors.
+- Aligned the sidebar panel edge spacing, hid the outer content scrollbar, and removed bottom page status text.
+- Kept the fixed 600x460 window, 118px sidebar, and 450px overview card layout.
+
 ## v0.6.2 - 2026-06-12
 
 - Restyled the macOS control app with a hidden titlebar title, no top divider, and closed rounded sidebar panels.
