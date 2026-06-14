@@ -132,6 +132,34 @@ VALUE_LABELS = {
     "codex_cli_missing": "未找到 Codex CLI",
     "codex_app_missing": "未找到 Codex App",
     "update already in progress": "正在应用更新，请稍后再试",
+    "set_config": "保存设置",
+}
+
+CONFIG_SET_KEYS = {
+    "port",
+    "rate_limit_cooldown",
+    "rotation_strategy",
+    "product_mode",
+    "max_retries",
+    "quota_refresh_interval",
+    "quota_tracker_enabled",
+    "max_request_body_mb",
+    "upstream_connect_timeout_sec",
+    "upstream_transient_retries",
+    "upstream_transient_backoff_ms",
+    "codex_stream_mode",
+    "codex_hybrid_probe_seconds",
+    "codex_hybrid_probe_bytes",
+    "codex_stream_retry_cooldown",
+    "stream_keepalive_seconds",
+    "stream_bootstrap_retries",
+    "nonstream_keepalive_interval",
+    "websocket_heartbeat_seconds",
+    "session_affinity_enabled",
+    "session_affinity_ttl_seconds",
+    "quota_weight_5h",
+    "quota_weight_7d",
+    "log_level",
 }
 
 
@@ -991,6 +1019,7 @@ def status() -> dict:
         "mode": codex.get("mode"),
         "strategy": cfg.get("rotation_strategy"),
         "product_mode": cfg.get("product_mode"),
+        "config": cfg,
         "codex_stream_mode": cfg.get("codex_stream_mode"),
         "codex_hybrid_probe_seconds": cfg.get("codex_hybrid_probe_seconds"),
         "codex_hybrid_probe_bytes": cfg.get("codex_hybrid_probe_bytes"),
@@ -1057,6 +1086,49 @@ def set_rotation_strategy(strategy: str) -> dict:
     }
 
 
+def set_config(config_json: str) -> dict:
+    try:
+        updates = json.loads(config_json or "{}")
+    except json.JSONDecodeError as e:
+        return {"action": "set_config", "error": f"invalid config json: {e}"}
+    if not isinstance(updates, dict):
+        return {"action": "set_config", "error": "config update must be an object"}
+
+    unknown = sorted(set(updates) - CONFIG_SET_KEYS)
+    if unknown:
+        return {
+            "action": "set_config",
+            "error": "unsupported config keys: " + ", ".join(unknown),
+            "unsupported_keys": unknown,
+        }
+
+    current = config.load()
+    old_port = current.get("port")
+    if "quota_tracker_enabled" in updates:
+        updates["quota_tracker_user_set"] = True
+    if "codex_stream_mode" in updates:
+        updates["codex_stream_mode_user_set"] = True
+    current.update(updates)
+    try:
+        config.save(current)
+        updated = config.load()
+    except config.ConfigError as e:
+        return {"action": "set_config", "error": str(e)}
+
+    changed = {
+        key: updated.get(key)
+        for key in sorted(updates)
+        if key in updated
+    }
+    return {
+        "action": "set_config",
+        "updated": True,
+        "changed": changed,
+        "config": updated,
+        "restart_required": old_port != updated.get("port"),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -1084,11 +1156,13 @@ def main() -> None:
             "clear-auth-error",
             "set-rotation-strategy",
             "set-codex-stream-mode",
+            "set-config",
         ),
     )
     parser.add_argument("--name", default="")
     parser.add_argument("--strategy", default="")
     parser.add_argument("--stream-mode", default="")
+    parser.add_argument("--config-json", default="{}")
     parser.add_argument("--format", choices=("pretty", "json"), default="pretty")
     args = parser.parse_args()
 
@@ -1115,6 +1189,7 @@ def main() -> None:
         "clear-auth-error": lambda: clear_auth_error(args.name),
         "set-rotation-strategy": lambda: set_rotation_strategy(args.strategy),
         "set-codex-stream-mode": lambda: set_codex_stream_mode(args.stream_mode),
+        "set-config": lambda: set_config(args.config_json),
     }
     print(render_output(actions[args.action](), args.format))
 

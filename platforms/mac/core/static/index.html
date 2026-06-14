@@ -35,7 +35,12 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
 .toolbar{display:flex;gap:8px;align-items:center}
 .token-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}
 .usage-charts{display:grid;grid-template-columns:minmax(280px,1fr) minmax(320px,1.35fr);gap:18px;align-items:start}
+.chart-header{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
 .chart-title{font-size:12px;font-weight:700;color:var(--muted);margin-bottom:8px}
+.chart-header .chart-title{margin-bottom:0}
+.usage-mode{display:flex;gap:4px}
+.usage-mode button{padding:4px 8px;font-size:12px}
+.usage-mode button.active{border-color:var(--blue);color:var(--blue)}
 .bar-chart{height:150px;display:grid;grid-template-columns:repeat(31,minmax(4px,1fr));gap:3px;align-items:end;border-bottom:1px solid var(--line);padding-top:8px}
 .usage-bar{position:relative;min-height:3px;border-radius:4px 4px 0 0;background:var(--blue);opacity:.85;outline:0}
 .usage-bar:hover,.usage-bar:focus{opacity:1;box-shadow:0 0 0 2px color-mix(in srgb,var(--blue) 35%,transparent)}
@@ -108,6 +113,9 @@ button:hover{border-color:var(--blue)}
 </main>
 
 <script>
+let tokenUsageHeatmapMode = 'daily';
+let latestTokenUsage = null;
+
 async function fetchJSON(path, options = {}) {
   const response = await fetch(path, { cache: 'no-store', ...options });
   const text = await response.text();
@@ -213,6 +221,7 @@ function renderAccounts(accounts, quota) {
 }
 
 function renderTokenUsage(usage) {
+  latestTokenUsage = usage;
   const total = usage?.total || {};
   const daily = Array.isArray(usage?.daily) ? usage.daily : [];
   const weekly = Array.isArray(usage?.weekly) ? usage.weekly : [];
@@ -222,6 +231,9 @@ function renderTokenUsage(usage) {
   const recentDays = daily.slice(-31);
   const maxRecent = Math.max(1, ...recentDays.map(row => Number(row.total_tokens) || 0));
   const maxHeat = Math.max(1, ...daily.map(row => Number(row.total_tokens) || 0));
+  const heatRows = tokenUsageHeatmapMode === 'weekly' ? weeklyHeatmapRows(daily) : daily;
+  const heatMax = tokenUsageHeatmapMode === 'weekly' ? 7 : maxHeat;
+  const heatTitle = tokenUsageHeatmapMode === 'weekly' ? '最近 371 天热力表 · 每周使用天数' : '最近 371 天热力表 · 每日 Token';
   const cards = `
     <div class="token-grid">
       <div><div class="num">${formatTokenCount(today.total_tokens || 0)}</div><div class="label">今日 Token</div></div>
@@ -240,10 +252,22 @@ function renderTokenUsage(usage) {
         <div class="bar-chart">${recentDays.map(row => usageBar(row, maxRecent)).join('')}</div>
       </div>
       <div>
-        <div class="chart-title">最近 371 天热力表</div>
-        <div class="heatmap-wrap"><div class="heatmap">${heatmapCells(daily, maxHeat)}</div></div>
+        <div class="chart-header">
+          <div class="chart-title">${heatTitle}</div>
+          <div class="usage-mode">
+            <button type="button" class="${tokenUsageHeatmapMode === 'daily' ? 'active' : ''}" onclick="setTokenUsageHeatmapMode('daily')">每日</button>
+            <button type="button" class="${tokenUsageHeatmapMode === 'weekly' ? 'active' : ''}" onclick="setTokenUsageHeatmapMode('weekly')">每周</button>
+          </div>
+        </div>
+        <div class="heatmap-wrap"><div class="heatmap">${heatmapCells(heatRows, heatMax)}</div></div>
       </div>
     </div>`;
+}
+
+function setTokenUsageHeatmapMode(mode) {
+  if (!['daily', 'weekly'].includes(mode)) return;
+  tokenUsageHeatmapMode = mode;
+  if (latestTokenUsage) renderTokenUsage(latestTokenUsage);
 }
 
 function usageBar(row, maxValue) {
@@ -257,11 +281,50 @@ function heatmapCells(rows, maxValue) {
   const blanks = rows.length ? new Date(`${rows[0].date}T00:00:00`).getDay() : 0;
   const leading = Array.from({ length: blanks }, () => '<span></span>').join('');
   return leading + rows.map(row => {
-    const total = Number(row.total_tokens) || 0;
-    const level = total <= 0 ? 0 : Math.max(1, Math.min(4, Math.ceil((total / maxValue) * 4)));
+    const heatValue = row.heat_value == null ? Number(row.total_tokens) || 0 : Number(row.heat_value) || 0;
+    const level = heatValue <= 0 ? 0 : Math.max(1, Math.min(4, Math.ceil((heatValue / maxValue) * 4)));
     const tip = usageTip(row);
     return `<div class="heat-cell tooltip-source" tabindex="0" data-level="${level}" data-tip="${esc(tip)}" title="${esc(tip)}"></div>`;
   }).join('');
+}
+
+function weeklyHeatmapRows(daily) {
+  const keys = [
+    'input_tokens', 'output_tokens', 'reasoning_tokens', 'cached_tokens',
+    'cache_tokens', 'cache_read_tokens', 'cache_creation_tokens',
+    'cache_tokens_observed_requests', 'reasoning_tokens_observed_requests',
+    'total_tokens', 'requests', 'unknown_requests'
+  ];
+  const blanks = daily.length ? new Date(`${daily[0].date}T00:00:00`).getDay() : 0;
+  const totals = new Map();
+  daily.forEach((row, index) => {
+    const column = Math.floor((blanks + index) / 7);
+    if (!totals.has(column)) {
+      const total = { week_start: row.date, week_end: row.date, active_days: 0 };
+      keys.forEach(key => total[key] = 0);
+      totals.set(column, total);
+    }
+    const total = totals.get(column);
+    total.week_end = row.date || total.week_end;
+    if ((Number(row.requests) || 0) > 0 || (Number(row.total_tokens) || 0) > 0) {
+      total.active_days += 1;
+    }
+    keys.forEach(key => total[key] += Number(row[key]) || 0);
+  });
+  return daily.map((row, index) => {
+    const column = Math.floor((blanks + index) / 7);
+    const total = totals.get(column) || {};
+    const label = total.week_end && total.week_end !== total.week_start
+      ? `${total.week_start} 至 ${total.week_end}`
+      : total.week_start || row.date;
+    return {
+      ...row,
+      ...total,
+      date: row.date,
+      period_label: label,
+      heat_value: Number(total.active_days) || 0,
+    };
+  });
 }
 
 function usageTip(row) {
@@ -275,14 +338,16 @@ function usageTip(row) {
     : Math.max(Number(row.cached_tokens) || 0, Number(row.cache_tokens) || 0);
   const cacheObserved = Boolean(row.cache_tokens_observed) || (Number(row.cache_tokens_observed_requests) || 0) > 0;
   const reasoningObserved = Boolean(row.reasoning_tokens_observed) || (Number(row.reasoning_tokens_observed_requests) || 0) > 0;
-  return [
-    row.date || row.week_start || '-',
+  const lines = [
+    row.period_label || row.date || row.week_start || '-',
     `总计 ${formatExactTokenCount(row.total_tokens || 0)} tokens`,
     `输入 ${formatExactTokenCount(row.input_tokens || 0)} · 输出 ${formatExactTokenCount(row.output_tokens || 0)}`,
     `缓存 ${cacheObserved ? formatExactTokenCount(cache) : '-'}`,
     `推理 ${reasoningObserved ? formatExactTokenCount(row.reasoning_tokens || 0) : '-'}`,
     `请求 ${requests} · 已知 ${known} · 未知 ${unknown}`
-  ].join('\n');
+  ];
+  if ((Number(row.active_days) || 0) > 0) lines.push(`使用天数 ${Number(row.active_days) || 0} / 7`);
+  return lines.join('\n');
 }
 
 function quotaSummary(data) {

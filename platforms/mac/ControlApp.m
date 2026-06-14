@@ -132,6 +132,7 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
     NSInteger requests = (NSInteger)CPDouble(row[@"requests"]);
     NSInteger unknown = (NSInteger)CPDouble(row[@"unknown_requests"]);
     NSInteger known = MAX(0, requests - unknown);
+    NSInteger activeDays = (NSInteger)CPDouble(row[@"active_days"]);
     double cacheReadTokens = CPDouble(row[@"cache_read_tokens"]);
     double cacheCreationTokens = CPDouble(row[@"cache_creation_tokens"]);
     double cacheTokens = (cacheReadTokens || cacheCreationTokens)
@@ -139,7 +140,8 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
         : MAX(CPDouble(row[@"cached_tokens"]), CPDouble(row[@"cache_tokens"]));
     BOOL cacheObserved = CPDouble(row[@"cache_tokens_observed_requests"]) > 0 || CPBool(row[@"cache_tokens_observed"]);
     BOOL reasoningObserved = CPDouble(row[@"reasoning_tokens_observed_requests"]) > 0 || CPBool(row[@"reasoning_tokens_observed"]);
-    return [NSString stringWithFormat:@"%@\n总计 %@ tokens\n输入 %@ · 输出 %@\n缓存 %@\n推理 %@\n请求 %ld · 已知 %ld · 未知 %ld\n本地代理捕获口径",
+    NSString *activeText = activeDays > 0 ? [NSString stringWithFormat:@"\n使用天数 %ld / 7", (long)activeDays] : @"";
+    return [NSString stringWithFormat:@"%@\n总计 %@ tokens\n输入 %@ · 输出 %@\n缓存 %@\n推理 %@\n请求 %ld · 已知 %ld · 未知 %ld%@\n本地代理捕获口径",
             CPTokenUsagePeriodLabel(row),
             CPExactTokenCount(row[@"total_tokens"]),
             CPExactTokenCount(row[@"input_tokens"]),
@@ -148,7 +150,8 @@ static NSString *CPTokenUsageTooltip(NSDictionary *row) {
             reasoningObserved ? CPExactTokenCount(row[@"reasoning_tokens"]) : @"-",
             (long)requests,
             (long)known,
-            (long)unknown];
+            (long)unknown,
+            activeText];
 }
 
 static BOOL CPIsDarkAppearance(NSAppearance *appearance) {
@@ -187,8 +190,30 @@ static NSColor *CPSidebarBorderColor(void) {
                              [NSColor colorWithCalibratedWhite:1.00 alpha:0.16]);
 }
 
+@class ControlWindowController;
+
+@interface SettingsWindowController : NSObject <NSWindowDelegate>
+@property(nonatomic, weak) ControlWindowController *owner;
+@property(nonatomic, strong) NSWindow *window;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSControl *> *controls;
+@property(nonatomic, strong) NSDictionary *configSnapshot;
+@property(nonatomic, strong) NSDictionary *statusSnapshot;
+@property(nonatomic, strong) NSDictionary *codexSnapshot;
+@property(nonatomic, strong) NSTextField *statusLabel;
+@property(nonatomic, strong) NSTextField *serviceLabel;
+@property(nonatomic, strong) NSTextField *codexLabel;
+@property(nonatomic, strong) NSTextField *baseURLLabel;
+@property(nonatomic, strong) NSTextField *diagnosticsLabel;
+@property(nonatomic, strong) NSSegmentedControl *proxyModeControl;
+@property(nonatomic, strong) NSTabView *tabView;
+@property(nonatomic, strong) NSMutableArray<NSScrollView *> *scrollViews;
+- (instancetype)initWithOwner:(ControlWindowController *)owner;
+- (void)show;
+@end
+
 @interface ControlWindowController : NSObject <NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate>
 @property(nonatomic, strong) NSWindow *window;
+@property(nonatomic, strong) SettingsWindowController *settingsController;
 @property(nonatomic, strong) NSSplitView *splitView;
 @property(nonatomic, strong) NSStackView *sidebarStack;
 @property(nonatomic, strong) NSStackView *toolbarStack;
@@ -222,6 +247,17 @@ static NSColor *CPSidebarBorderColor(void) {
 @property(nonatomic, assign) BOOL refreshInFlight;
 @property(nonatomic, assign) BOOL compactInspector;
 @property(nonatomic, assign) NSInteger tokenUsageMode;
+- (void)showSettings:(id)sender;
+- (void)repairAction:(id)sender;
+- (void)openCodexAction:(id)sender;
+- (void)openWebAction:(id)sender;
+- (void)openLogAction:(id)sender;
+- (void)openResultAction:(id)sender;
+- (void)showPathsAction:(id)sender;
+- (NSDictionary *)runPythonJSONSync:(NSArray<NSString *> *)args rawText:(NSString **)rawText;
+- (id)fetchJSONPath:(NSString *)path method:(NSString *)method timeout:(NSTimeInterval)timeout;
+- (void)appendLog:(NSString *)text;
+- (void)refreshSnapshots:(id)sender;
 @end
 
 @interface CPFlippedStackView : NSStackView
@@ -474,6 +510,31 @@ static NSColor *CPSidebarBorderColor(void) {
     NSInteger month = [[dateString substringWithRange:NSMakeRange(5, 2)] integerValue];
     return month > 0 ? [NSString stringWithFormat:@"%ld月", (long)month] : @"";
 }
+- (double)heatValueForRow:(NSDictionary *)row {
+    id heatValue = row[@"heat_value"];
+    if (heatValue && heatValue != NSNull.null) {
+        return CPDouble(heatValue);
+    }
+    return CPDouble(row[@"total_tokens"]);
+}
+- (double)heatMaxValueForRows:(NSArray<NSDictionary *> *)rows {
+    double maxValue = 1;
+    BOOL hasFixedMax = NO;
+    for (NSDictionary *row in rows) {
+        id heatMax = row[@"heat_max"];
+        if (heatMax && heatMax != NSNull.null) {
+            hasFixedMax = YES;
+            maxValue = MAX(maxValue, CPDouble(heatMax));
+        }
+    }
+    if (hasFixedMax) {
+        return maxValue;
+    }
+    for (NSDictionary *row in rows) {
+        maxValue = MAX(maxValue, [self heatValueForRow:row]);
+    }
+    return maxValue;
+}
 - (void)drawRect:(NSRect)dirtyRect {
     [super drawRect:dirtyRect];
     NSArray *rows = self.rows ?: @[];
@@ -482,10 +543,7 @@ static NSColor *CPSidebarBorderColor(void) {
     if (!rows.count) {
         return;
     }
-    double maxValue = 1;
-    for (NSDictionary *row in rows) {
-        maxValue = MAX(maxValue, CPDouble(row[@"total_tokens"]));
-    }
+    double maxValue = [self heatMaxValueForRows:rows];
     NSInteger rowCount = 7;
     NSInteger columns = 53;
     NSInteger leading = [self weekdayForDateString:CPString(rows.firstObject[@"date"])];
@@ -523,7 +581,7 @@ static NSColor *CPSidebarBorderColor(void) {
         NSRect cellRect = NSMakeRect(x, y, cell, cell);
         [self.hitRects addObject:[NSValue valueWithRect:cellRect]];
         [self.hitIndexes addObject:@(i)];
-        double ratio = maxValue <= 0 ? 0 : CPDouble(row[@"total_tokens"]) / maxValue;
+        double ratio = maxValue <= 0 ? 0 : [self heatValueForRow:row] / maxValue;
         BOOL hovered = i == self.hoverIndex;
         NSColor *color = ratio <= 0
             ? [NSColor.separatorColor colorWithAlphaComponent:0.35]
@@ -807,7 +865,9 @@ static NSColor *CPSidebarBorderColor(void) {
     self.toolbarStack.alignment = NSLayoutAttributeCenterY;
     self.toolbarStack.translatesAutoresizingMaskIntoConstraints = NO;
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"刷新" symbol:@"arrow.clockwise" selector:@selector(refreshSnapshots:) primary:NO]];
-    [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"启动/修复/更新后台" symbol:@"play.circle.fill" selector:@selector(repairAction:) primary:YES]];
+    NSButton *repairButton = [self actionButtonWithTitle:@"启动/修复" symbol:@"play.circle.fill" selector:@selector(repairAction:) primary:YES];
+    repairButton.toolTip = @"启动、修复或更新后台代理服务";
+    [self.toolbarStack addArrangedSubview:repairButton];
     [self.toolbarStack addArrangedSubview:[self actionButtonWithTitle:@"打开 Codex" symbol:@"arrow.up.forward.app" selector:@selector(openCodexAction:) primary:NO]];
     [header addSubview:self.toolbarStack];
     [NSLayoutConstraint activateConstraints:@[
@@ -822,7 +882,7 @@ static NSColor *CPSidebarBorderColor(void) {
 
     NSScrollView *scroll = [[NSScrollView alloc] init];
     scroll.drawsBackground = NO;
-    scroll.hasVerticalScroller = NO;
+    scroll.hasVerticalScroller = YES;
     scroll.autohidesScrollers = YES;
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
 
@@ -861,6 +921,10 @@ static NSColor *CPSidebarBorderColor(void) {
     }
     [self reloadAccountTableSelection];
     [self updateHeaderText];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.window.contentView layoutSubtreeIfNeeded];
+        [self auditVisibleButtonsWithContext:self.activeSection ?: @"unknown"];
+    });
 }
 
 - (void)renderOverviewSection {
@@ -886,10 +950,7 @@ static NSColor *CPSidebarBorderColor(void) {
     if ([self shouldShowSetupCard]) {
         [self.contentStack addArrangedSubview:[self constrainedContentView:[self setupChecklistCard]]];
     }
-    [self.contentStack addArrangedSubview:[self constrainedContentView:[self metricsRow]]];
-    [self.contentStack addArrangedSubview:[self constrainedContentView:[self accountsTableCardWithHeight:176]]];
-    [self.contentStack addArrangedSubview:[self constrainedContentView:[self inspectorCardWithHeight:126 compact:YES]]];
-    [self.contentStack addArrangedSubview:[self constrainedContentView:[self accountQuickActionsCard]]];
+    [self.contentStack addArrangedSubview:[self constrainedContentView:[self accountManagementCard]]];
 }
 
 - (void)renderQuotaSection {
@@ -1053,7 +1114,7 @@ static NSColor *CPSidebarBorderColor(void) {
     [card addSubview:stack];
     [self pinView:stack toView:card insets:NSEdgeInsetsMake(10, 12, 10, 12)];
     [stack addArrangedSubview:[self labelWithText:@"后台未同步" font:[NSFont systemFontOfSize:14 weight:NSFontWeightBold] color:NSColor.systemOrangeColor]];
-    [stack addArrangedSubview:[self emptyStateLabel:@"Token 历史事件接口不可用，历史列表和图表可能不完整。请点击“启动/修复/更新后台”或“应用更新”。"]];
+    [stack addArrangedSubview:[self emptyStateLabel:@"Token 历史事件接口不可用，历史列表和图表可能不完整。请使用主窗口顶部的“启动/修复”，或在配置页执行“应用更新”。"]];
     return card;
 }
 
@@ -1073,11 +1134,11 @@ static NSColor *CPSidebarBorderColor(void) {
     [stack addArrangedSubview:[self labelWithText:title
                                              font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold]
                                             color:NSColor.systemOrangeColor]];
-    NSString *message = @"后台或运行目录版本与当前 App 不一致。请退出并重新打开小腊肠，或点击启动/修复同步后台。";
+    NSString *message = @"后台或运行目录版本与当前 App 不一致。请退出并重新打开小腊肠，或使用主窗口顶部的“启动/修复”同步后台。";
     if (manifestMismatch) {
-        message = @"运行目录中的文件与当前 App 内置文件不一致。点击同步运行文件后，小腊肠会更新后台运行文件并重启代理。";
+        message = @"运行目录中的文件与当前 App 内置文件不一致。使用主窗口顶部的“启动/修复”后，小腊肠会更新后台运行文件并重启代理。";
     } else if (usageMismatch) {
-        message = @"Token 统计库还没有完成缓存/推理捕获状态迁移。点击启动/修复会重启后台并触发迁移。";
+        message = @"Token 统计库还没有完成缓存/推理捕获状态迁移。使用主窗口顶部的“启动/修复”会重启后台并触发迁移。";
     }
     [stack addArrangedSubview:[self emptyStateLabel:message]];
     NSString *fileSummary = [self runtimeManifestFilesSummary];
@@ -1085,16 +1146,6 @@ static NSColor *CPSidebarBorderColor(void) {
         [stack addArrangedSubview:[self emptyStateLabel:fileSummary]];
     }
     [stack addArrangedSubview:[self versionDiagnosticsGridCompact:YES]];
-    NSStackView *buttons = [[NSStackView alloc] init];
-    buttons.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    buttons.spacing = 6;
-    [buttons addArrangedSubview:[self actionButtonWithTitle:manifestMismatch ? @"同步运行文件" : @"启动/修复"
-                                                     symbol:@"arrow.triangle.2.circlepath"
-                                                   selector:@selector(repairAction:)
-                                                    primary:YES]];
-    NSView *flex = [[NSView alloc] init];
-    [buttons addArrangedSubview:flex];
-    [stack addArrangedSubview:buttons];
     return card;
 }
 
@@ -1468,6 +1519,9 @@ static NSColor *CPSidebarBorderColor(void) {
         if (date.length) {
             total[@"week_end"] = date;
         }
+        if (CPDouble(day[@"requests"]) > 0 || CPDouble(day[@"total_tokens"]) > 0) {
+            total[@"active_days"] = @(CPDouble(total[@"active_days"]) + 1);
+        }
         for (NSString *key in keys) {
             total[key] = @(CPDouble(total[key]) + CPDouble(day[key]));
         }
@@ -1481,6 +1535,9 @@ static NSColor *CPSidebarBorderColor(void) {
         for (NSString *key in keys) {
             next[key] = @(CPDouble(week[key]));
         }
+        next[@"active_days"] = @(CPDouble(week[@"active_days"]));
+        next[@"heat_value"] = next[@"active_days"];
+        next[@"heat_max"] = @7;
         NSString *weekStart = CPString(week[@"week_start"]);
         NSString *weekEnd = CPString(week[@"week_end"]);
         if (weekStart.length) {
@@ -1867,7 +1924,6 @@ static NSColor *CPSidebarBorderColor(void) {
     [header addArrangedSubview:[self labelWithText:@"账号列表" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
     NSView *flex = [[NSView alloc] init];
     [header addArrangedSubview:flex];
-    [header addArrangedSubview:[self smallButtonWithTitle:@"额度" symbol:@"chart.bar" selector:@selector(refreshQuotaAction:)]];
     [header addArrangedSubview:[self smallButtonWithTitle:@"扫描" symbol:@"arrow.triangle.2.circlepath" selector:@selector(scanAccountsAction:)]];
     [header addArrangedSubview:[self smallButtonWithTitle:@"登录" symbol:@"plus" selector:@selector(startLoginAction:)]];
     [header addArrangedSubview:[self smallButtonWithTitle:@"导入" symbol:@"square.and.arrow.down" selector:@selector(importCurrentAction:)]];
@@ -1914,6 +1970,78 @@ static NSColor *CPSidebarBorderColor(void) {
     return card;
 }
 
+- (NSView *)accountManagementCard {
+    NSView *card = [self cardView];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    [card.heightAnchor constraintEqualToConstant:390].active = YES;
+
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.spacing = 8;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:stack];
+    [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 12, 12)];
+
+    NSStackView *header = [[NSStackView alloc] init];
+    header.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    header.alignment = NSLayoutAttributeCenterY;
+    [header addArrangedSubview:[self labelWithText:@"账号管理" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
+    NSView *flex = [[NSView alloc] init];
+    [header addArrangedSubview:flex];
+    [header addArrangedSubview:[self smallButtonWithTitle:@"扫描" symbol:@"arrow.triangle.2.circlepath" selector:@selector(scanAccountsAction:)]];
+    [header addArrangedSubview:[self smallButtonWithTitle:@"登录" symbol:@"plus" selector:@selector(startLoginAction:)]];
+    [header addArrangedSubview:[self smallButtonWithTitle:@"导入" symbol:@"square.and.arrow.down" selector:@selector(importCurrentAction:)]];
+    [stack addArrangedSubview:header];
+
+    NSScrollView *scroll = [[NSScrollView alloc] init];
+    scroll.hasVerticalScroller = YES;
+    scroll.hasHorizontalScroller = NO;
+    scroll.autohidesScrollers = YES;
+    scroll.drawsBackground = NO;
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    self.accountTable = [[NSTableView alloc] init];
+    self.accountTable.delegate = self;
+    self.accountTable.dataSource = self;
+    self.accountTable.usesAlternatingRowBackgroundColors = NO;
+    self.accountTable.allowsMultipleSelection = NO;
+    self.accountTable.rowHeight = 28;
+    self.accountTable.headerView = [[NSTableHeaderView alloc] initWithFrame:NSMakeRect(0, 0, 10, 24)];
+    if (@available(macOS 11.0, *)) {
+        self.accountTable.style = NSTableViewStyleFullWidth;
+    }
+
+    NSArray<NSDictionary *> *columns = @[
+        @{@"id": @"name", @"title": @"名称", @"width": @40},
+        @{@"id": @"email", @"title": @"邮箱", @"width": @168},
+        @{@"id": @"state", @"title": @"状态", @"width": @54},
+        @{@"id": @"quota", @"title": @"5h", @"width": @48},
+        @{@"id": @"weekly", @"title": @"7d", @"width": @48},
+    ];
+    for (NSDictionary *spec in columns) {
+        NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:spec[@"id"]];
+        column.title = spec[@"title"];
+        column.width = [spec[@"width"] doubleValue];
+        column.minWidth = 34;
+        column.resizingMask = NSTableColumnAutoresizingMask;
+        BOOL leftAligned = [spec[@"id"] isEqualToString:@"name"] || [spec[@"id"] isEqualToString:@"email"];
+        column.headerCell.alignment = leftAligned ? NSTextAlignmentLeft : NSTextAlignmentCenter;
+        [self.accountTable addTableColumn:column];
+    }
+    self.accountTable.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
+    scroll.documentView = self.accountTable;
+    [stack addArrangedSubview:scroll];
+    [scroll.heightAnchor constraintEqualToConstant:164].active = YES;
+
+    self.compactInspector = YES;
+    self.inspectorStack = [[NSStackView alloc] init];
+    self.inspectorStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.inspectorStack.spacing = 6;
+    self.inspectorStack.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack addArrangedSubview:self.inspectorStack];
+    [self rebuildInspector];
+    return card;
+}
+
 - (NSView *)inspectorCard {
     return [self inspectorCardWithHeight:300 compact:NO];
 }
@@ -1947,13 +2075,11 @@ static NSColor *CPSidebarBorderColor(void) {
     [card addSubview:stack];
     [self pinView:stack toView:card insets:NSEdgeInsetsMake(16, 16, 16, 16)];
     [stack addArrangedSubview:[self labelWithText:@"账号操作" font:[NSFont systemFontOfSize:17 weight:NSFontWeightBold] color:NSColor.labelColor]];
-    [stack addArrangedSubview:[self labelWithText:@"选中账号后，右侧检查器会直接执行启用/禁用、刷新令牌、解除冷却和删除。新增账号可以生成登录命令，也可以直接打开登录页。" font:[NSFont systemFontOfSize:13 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor]];
+    [stack addArrangedSubview:[self labelWithText:@"选中账号后，右侧检查器会直接执行启用/禁用、刷新令牌、解除冷却和删除。新增账号可以复制登录命令，或使用账号列表顶部的登录和导入入口。" font:[NSFont systemFontOfSize:13 weight:NSFontWeightRegular] color:NSColor.secondaryLabelColor]];
     NSStackView *buttons = [[NSStackView alloc] init];
     buttons.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     buttons.spacing = 8;
     [buttons addArrangedSubview:[self actionButtonWithTitle:@"复制登录命令" symbol:@"doc.on.doc" selector:@selector(loginCommandAction:) primary:NO]];
-    [buttons addArrangedSubview:[self actionButtonWithTitle:@"打开登录页" symbol:@"person.crop.circle.badge.plus" selector:@selector(startLoginAction:) primary:NO]];
-    [buttons addArrangedSubview:[self actionButtonWithTitle:@"导入当前账号" symbol:@"square.and.arrow.down" selector:@selector(importCurrentAction:) primary:NO]];
     [stack addArrangedSubview:buttons];
     return card;
 }
@@ -1975,7 +2101,6 @@ static NSColor *CPSidebarBorderColor(void) {
     [header addArrangedSubview:[self labelWithText:@"额度状态" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
     NSView *flex = [[NSView alloc] init];
     [header addArrangedSubview:flex];
-    [header addArrangedSubview:[self smallButtonWithTitle:@"刷新额度" symbol:@"arrow.clockwise.circle" selector:@selector(refreshQuotaAction:)]];
     [stack addArrangedSubview:header];
     [stack addArrangedSubview:[self emptyStateLabel:[self quotaTrackerSummaryText]]];
 
@@ -2174,10 +2299,8 @@ static NSColor *CPSidebarBorderColor(void) {
     NSStackView *buttons = [[NSStackView alloc] init];
     buttons.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     buttons.spacing = 6;
-    [buttons addArrangedSubview:[self actionButtonWithTitle:@"启用代理" symbol:@"checkmark.shield" selector:@selector(enableProxyAction:) primary:NO]];
-    [buttons addArrangedSubview:[self actionButtonWithTitle:@"Codex 直连" symbol:@"bolt.slash" selector:@selector(disableProxyAction:) primary:NO]];
+    buttons.distribution = NSStackViewDistributionFillEqually;
     [buttons addArrangedSubview:[self actionButtonWithTitle:@"应用更新" symbol:@"arrow.down.app" selector:@selector(applyUpdateAction:) primary:NO]];
-    [buttons addArrangedSubview:[self actionButtonWithTitle:@"路径与依赖" symbol:@"folder" selector:@selector(showPathsAction:) primary:NO]];
     [stack addArrangedSubview:buttons];
     return card;
 }
@@ -2260,13 +2383,7 @@ static NSColor *CPSidebarBorderColor(void) {
     [card addSubview:stack];
     [self pinView:stack toView:card insets:NSEdgeInsetsMake(12, 12, 12, 12)];
     [stack addArrangedSubview:[self labelWithText:@"诊断操作" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
-    NSStackView *buttons = [[NSStackView alloc] init];
-    buttons.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    buttons.spacing = 6;
-    [buttons addArrangedSubview:[self actionButtonWithTitle:@"打开日志" symbol:@"doc.text.magnifyingglass" selector:@selector(openLogAction:) primary:NO]];
-    [buttons addArrangedSubview:[self actionButtonWithTitle:@"打开结果文件" symbol:@"doc" selector:@selector(openResultAction:) primary:NO]];
-    [buttons addArrangedSubview:[self actionButtonWithTitle:@"查看路径与依赖" symbol:@"folder.badge.gearshape" selector:@selector(showPathsAction:) primary:NO]];
-    [stack addArrangedSubview:buttons];
+    [stack addArrangedSubview:[self emptyStateLabel:@"诊断操作已集中到设置窗口的“诊断”页。"]];
     return card;
 }
 
@@ -2293,11 +2410,6 @@ static NSColor *CPSidebarBorderColor(void) {
     [header addArrangedSubview:[self labelWithText:@"活动日志" font:[NSFont systemFontOfSize:16 weight:NSFontWeightBold] color:NSColor.labelColor]];
     NSView *flex = [[NSView alloc] init];
     [header addArrangedSubview:flex];
-    if (actions) {
-        [header addArrangedSubview:[self smallButtonWithTitle:@"日志" symbol:@"doc.text.magnifyingglass" selector:@selector(openLogAction:)]];
-        [header addArrangedSubview:[self smallButtonWithTitle:@"结果" symbol:@"doc" selector:@selector(openResultAction:)]];
-        [header addArrangedSubview:[self smallButtonWithTitle:@"路径" symbol:@"folder.badge.gearshape" selector:@selector(showPathsAction:)]];
-    }
     [stack addArrangedSubview:header];
 
     NSScrollView *scroll = [[NSScrollView alloc] init];
@@ -2319,7 +2431,7 @@ static NSColor *CPSidebarBorderColor(void) {
     NSView *card = [self cardViewWithBackground:NSColor.textBackgroundColor];
     card.wantsLayer = YES;
     card.translatesAutoresizingMaskIntoConstraints = NO;
-    [card.heightAnchor constraintEqualToConstant:320].active = YES;
+    [card.heightAnchor constraintEqualToConstant:390].active = YES;
 
     NSStackView *stack = [[NSStackView alloc] init];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -2337,15 +2449,13 @@ static NSColor *CPSidebarBorderColor(void) {
     NSView *flex = [[NSView alloc] init];
     [header addArrangedSubview:flex];
     [header addArrangedSubview:[self smallButtonWithTitle:@"清空" symbol:@"trash" selector:@selector(clearRecentRequestsAction:)]];
-    [header addArrangedSubview:[self smallButtonWithTitle:@"刷新" symbol:@"arrow.clockwise" selector:@selector(refreshSnapshots:)]];
-    [header addArrangedSubview:[self smallButtonWithTitle:@"路径" symbol:@"folder.badge.gearshape" selector:@selector(showPathsAction:)]];
     [stack addArrangedSubview:header];
 
     CPThemedView *table = [[CPThemedView alloc] init];
     table.wantsLayer = YES;
     table.cpBackgroundColor = NSColor.controlBackgroundColor;
     table.translatesAutoresizingMaskIntoConstraints = NO;
-    [table.heightAnchor constraintGreaterThanOrEqualToConstant:248].active = YES;
+    [table.heightAnchor constraintEqualToConstant:326].active = YES;
     [stack addArrangedSubview:table];
     [table.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
 
@@ -2361,7 +2471,7 @@ static NSColor *CPSidebarBorderColor(void) {
     [rows addArrangedSubview:head];
     [head.widthAnchor constraintEqualToAnchor:rows.widthAnchor].active = YES;
     NSArray *items = CPArray(self.statusSnapshot[@"recent_requests"]);
-    NSInteger count = MIN((NSInteger)items.count, 9);
+    NSInteger count = MIN((NSInteger)items.count, 12);
     for (NSInteger i = 0; i < count; i++) {
         NSDictionary *item = CPDict(items[i]);
         NSView *row = [self recentRequestRowWithTime:[self requestTimeText:item[@"at"]]
@@ -2547,11 +2657,14 @@ static NSColor *CPSidebarBorderColor(void) {
     button.imagePosition = NSImageLeading;
     button.font = [NSFont systemFontOfSize:12 weight:primary ? NSFontWeightSemibold : NSFontWeightRegular];
     button.translatesAutoresizingMaskIntoConstraints = NO;
+    button.toolTip = title;
     NSImage *image = [self symbolImageNamed:symbol];
     if (image) {
         button.image = image;
     }
     [button.heightAnchor constraintEqualToConstant:28].active = YES;
+    [button setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [button setContentHuggingPriority:NSLayoutPriorityDefaultHigh forOrientation:NSLayoutConstraintOrientationHorizontal];
     [self.buttons addObject:button];
     return button;
 }
@@ -2977,6 +3090,13 @@ static NSColor *CPSidebarBorderColor(void) {
 
 - (void)statusAction:(id)sender {
     [self refreshSnapshots:nil];
+}
+
+- (void)showSettings:(id)sender {
+    if (!self.settingsController) {
+        self.settingsController = [[SettingsWindowController alloc] initWithOwner:self];
+    }
+    [self.settingsController show];
 }
 
 - (void)repairAction:(id)sender {
@@ -3528,6 +3648,46 @@ static NSColor *CPSidebarBorderColor(void) {
     });
 }
 
+- (void)auditVisibleButtonsWithContext:(NSString *)context {
+    NSMutableArray<NSButton *> *buttons = [NSMutableArray array];
+    [self collectButtonsFromView:self.window.contentView into:buttons];
+    NSMutableArray<NSString *> *issues = [NSMutableArray array];
+    for (NSInteger i = 0; i < (NSInteger)buttons.count; i++) {
+        NSButton *a = buttons[i];
+        if (a.hidden || a.alphaValue <= 0.01 || !a.window) {
+            continue;
+        }
+        NSRect af = [a.superview convertRect:a.frame toView:nil];
+        CGFloat needed = a.intrinsicContentSize.width;
+        if (needed > 0 && af.size.width > 0 && needed > af.size.width + 3) {
+            [issues addObject:[NSString stringWithFormat:@"裁切：%@ need %.0f > %.0f", a.title, needed, af.size.width]];
+        }
+        for (NSInteger j = i + 1; j < (NSInteger)buttons.count; j++) {
+            NSButton *b = buttons[j];
+            if (b.hidden || b.alphaValue <= 0.01 || !b.window) {
+                continue;
+            }
+            NSRect bf = [b.superview convertRect:b.frame toView:nil];
+            NSRect inter = NSIntersectionRect(af, bf);
+            if (!NSIsEmptyRect(inter) && inter.size.width * inter.size.height > 4) {
+                [issues addObject:[NSString stringWithFormat:@"重叠：%@ / %@", a.title, b.title]];
+            }
+        }
+    }
+    if (issues.count) {
+        [self appendLog:[NSString stringWithFormat:@"布局巡检 %@\n%@", context, [issues componentsJoinedByString:@"\n"]]];
+    }
+}
+
+- (void)collectButtonsFromView:(NSView *)view into:(NSMutableArray<NSButton *> *)buttons {
+    if ([view isKindOfClass:NSButton.class]) {
+        [buttons addObject:(NSButton *)view];
+    }
+    for (NSView *subview in view.subviews) {
+        [self collectButtonsFromView:subview into:buttons];
+    }
+}
+
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
     return self.accounts.count;
 }
@@ -3655,14 +3815,24 @@ static NSColor *CPSidebarBorderColor(void) {
         reasonLabel.lineBreakMode = NSLineBreakByTruncatingTail;
         [self.inspectorStack addArrangedSubview:reasonLabel];
 
-        NSStackView *buttonRow = [[NSStackView alloc] init];
-        buttonRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-        buttonRow.spacing = 6;
-        [buttonRow addArrangedSubview:[self smallButtonWithTitle:@"刷新令牌" symbol:@"key" selector:@selector(refreshTokenAction:)]];
-        [buttonRow addArrangedSubview:[self smallButtonWithTitle:CPBool(account[@"enabled"]) ? @"禁用" : @"启用" symbol:@"power" selector:@selector(toggleAccountAction:)]];
-        [buttonRow addArrangedSubview:[self smallButtonWithTitle:@"解除冷却" symbol:@"timer" selector:@selector(clearCooldownAction:)]];
-        [buttonRow addArrangedSubview:[self smallButtonWithTitle:@"删除" symbol:@"trash" selector:@selector(deleteAccountAction:)]];
-        [self.inspectorStack addArrangedSubview:buttonRow];
+        NSStackView *buttonGrid = [[NSStackView alloc] init];
+        buttonGrid.orientation = NSUserInterfaceLayoutOrientationVertical;
+        buttonGrid.spacing = 6;
+        NSStackView *top = [[NSStackView alloc] init];
+        top.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+        top.spacing = 6;
+        top.distribution = NSStackViewDistributionFillEqually;
+        [top addArrangedSubview:[self smallButtonWithTitle:@"刷新令牌" symbol:@"key" selector:@selector(refreshTokenAction:)]];
+        [top addArrangedSubview:[self smallButtonWithTitle:CPBool(account[@"enabled"]) ? @"禁用" : @"启用" symbol:@"power" selector:@selector(toggleAccountAction:)]];
+        NSStackView *bottom = [[NSStackView alloc] init];
+        bottom.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+        bottom.spacing = 6;
+        bottom.distribution = NSStackViewDistributionFillEqually;
+        [bottom addArrangedSubview:[self smallButtonWithTitle:@"解除冷却" symbol:@"timer" selector:@selector(clearCooldownAction:)]];
+        [bottom addArrangedSubview:[self smallButtonWithTitle:@"删除" symbol:@"trash" selector:@selector(deleteAccountAction:)]];
+        [buttonGrid addArrangedSubview:top];
+        [buttonGrid addArrangedSubview:bottom];
+        [self.inspectorStack addArrangedSubview:buttonGrid];
         return;
     }
 
@@ -3851,6 +4021,648 @@ static NSColor *CPSidebarBorderColor(void) {
 
 @end
 
+@implementation SettingsWindowController
+
+- (instancetype)initWithOwner:(ControlWindowController *)owner {
+    self = [super init];
+    if (!self) {
+        return nil;
+    }
+    _owner = owner;
+    _controls = [NSMutableDictionary dictionary];
+    _scrollViews = [NSMutableArray array];
+    _configSnapshot = @{};
+    _statusSnapshot = @{};
+    _codexSnapshot = @{};
+    return self;
+}
+
+- (void)show {
+    if (!self.window) {
+        [self buildWindow];
+    }
+    [self.window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+    [self refresh:nil];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self scrollAllTabsToTop];
+    });
+    [self auditButtonsInWindow:self.window context:@"settings"];
+}
+
+- (void)buildWindow {
+    self.controls = [NSMutableDictionary dictionary];
+    self.scrollViews = [NSMutableArray array];
+    self.statusLabel = nil;
+    self.serviceLabel = nil;
+    self.codexLabel = nil;
+    self.baseURLLabel = nil;
+    self.diagnosticsLabel = nil;
+    self.proxyModeControl = nil;
+    self.tabView = nil;
+
+    NSRect frame = NSMakeRect(0, 0, 620, 520);
+    self.window = [[NSWindow alloc] initWithContentRect:frame
+                                             styleMask:(NSWindowStyleMaskTitled |
+                                                        NSWindowStyleMaskClosable |
+                                                        NSWindowStyleMaskMiniaturizable)
+                                               backing:NSBackingStoreBuffered
+                                                 defer:NO];
+    self.window.title = @"设置";
+    self.window.contentMinSize = NSMakeSize(620, 520);
+    self.window.delegate = self;
+    [self.window center];
+
+    NSStackView *root = [[NSStackView alloc] init];
+    root.orientation = NSUserInterfaceLayoutOrientationVertical;
+    root.spacing = 10;
+    root.edgeInsets = NSEdgeInsetsMake(14, 16, 14, 16);
+    root.translatesAutoresizingMaskIntoConstraints = NO;
+    self.window.contentView = root;
+
+    self.statusLabel = [self label:@"正在读取设置..." size:12 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
+    [root addArrangedSubview:self.statusLabel];
+
+    self.tabView = [[NSTabView alloc] init];
+    self.tabView.translatesAutoresizingMaskIntoConstraints = NO;
+    [root addArrangedSubview:self.tabView];
+    [self.tabView.heightAnchor constraintGreaterThanOrEqualToConstant:405].active = YES;
+
+    [self addTab:@"通用" view:[self scrollWithStack:[self generalStack]]];
+    [self addTab:@"Codex 代理" view:[self scrollWithStack:[self proxyStack]]];
+    [self addTab:@"账号与额度" view:[self scrollWithStack:[self quotaStack]]];
+    [self addTab:@"高级" view:[self scrollWithStack:[self advancedStack]]];
+    [self addTab:@"诊断" view:[self scrollWithStack:[self diagnosticsStack]]];
+
+    NSStackView *buttons = [[NSStackView alloc] init];
+    buttons.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    buttons.spacing = 8;
+    NSView *flex = [[NSView alloc] init];
+    [buttons addArrangedSubview:flex];
+    [buttons addArrangedSubview:[self button:@"刷新" symbol:@"arrow.clockwise" action:@selector(refresh:)]];
+    [buttons addArrangedSubview:[self button:@"恢复默认值" symbol:@"arrow.counterclockwise" action:@selector(restoreDefaults:)]];
+    NSButton *save = [self button:@"保存设置" symbol:@"checkmark.circle" action:@selector(save:)];
+    save.keyEquivalent = @"\r";
+    [buttons addArrangedSubview:save];
+    [root addArrangedSubview:buttons];
+}
+
+- (void)windowWillClose:(NSNotification *)notification {
+    if (notification.object != self.window) {
+        return;
+    }
+    self.window.delegate = nil;
+    self.window = nil;
+    self.controls = [NSMutableDictionary dictionary];
+    self.scrollViews = [NSMutableArray array];
+    self.statusLabel = nil;
+    self.serviceLabel = nil;
+    self.codexLabel = nil;
+    self.baseURLLabel = nil;
+    self.diagnosticsLabel = nil;
+    self.proxyModeControl = nil;
+    self.tabView = nil;
+}
+
+- (void)addTab:(NSString *)title view:(NSView *)view {
+    NSTabViewItem *item = [[NSTabViewItem alloc] initWithIdentifier:title];
+    item.label = title;
+    item.view = view;
+    [self.tabView addTabViewItem:item];
+}
+
+- (NSScrollView *)scrollWithStack:(NSStackView *)stack {
+    NSScrollView *scroll = [[NSScrollView alloc] init];
+    scroll.drawsBackground = NO;
+    scroll.hasVerticalScroller = YES;
+    scroll.autohidesScrollers = YES;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    scroll.documentView = stack;
+    [stack.widthAnchor constraintEqualToAnchor:scroll.contentView.widthAnchor constant:-2].active = YES;
+    [stack.heightAnchor constraintGreaterThanOrEqualToAnchor:scroll.contentView.heightAnchor].active = YES;
+    [self.scrollViews addObject:scroll];
+    return scroll;
+}
+
+- (NSStackView *)baseStack {
+    NSStackView *stack = [[CPFlippedStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.distribution = NSStackViewDistributionFill;
+    stack.alignment = NSLayoutAttributeWidth;
+    stack.spacing = 10;
+    stack.edgeInsets = NSEdgeInsetsMake(12, 10, 12, 10);
+    return stack;
+}
+
+- (NSStackView *)generalStack {
+    NSStackView *stack = [self baseStack];
+    [stack addArrangedSubview:[self sectionLabel:@"后台服务"]];
+    self.serviceLabel = [self detailLabel:@"正在读取后台状态..."];
+    [stack addArrangedSubview:self.serviceLabel];
+    [stack addArrangedSubview:[self sectionLabel:@"日志"]];
+    [stack addArrangedSubview:[self popupRow:@"日志级别" key:@"log_level" titles:@[@"DEBUG", @"INFO", @"WARNING", @"ERROR", @"CRITICAL"] values:@[@"DEBUG", @"INFO", @"WARNING", @"ERROR", @"CRITICAL"]]];
+    return stack;
+}
+
+- (NSStackView *)proxyStack {
+    NSStackView *stack = [self baseStack];
+    [stack addArrangedSubview:[self sectionLabel:@"Codex 代理模式"]];
+    self.proxyModeControl = [[NSSegmentedControl alloc] init];
+    self.proxyModeControl.segmentCount = 2;
+    [self.proxyModeControl setLabel:@"账号池代理" forSegment:0];
+    [self.proxyModeControl setLabel:@"直连" forSegment:1];
+    self.proxyModeControl.segmentStyle = NSSegmentStyleRounded;
+    self.proxyModeControl.selectedSegment = 0;
+    [stack addArrangedSubview:self.proxyModeControl];
+
+    self.codexLabel = [self detailLabel:@"正在读取 Codex 配置..."];
+    self.baseURLLabel = [self detailLabel:@"-"];
+    [stack addArrangedSubview:self.codexLabel];
+    [stack addArrangedSubview:self.baseURLLabel];
+    [stack addArrangedSubview:[self integerRow:@"代理端口" key:@"port" min:1024 max:65535]];
+    return stack;
+}
+
+- (NSStackView *)quotaStack {
+    NSStackView *stack = [self baseStack];
+    [stack addArrangedSubview:[self sectionLabel:@"账号选择"]];
+    [stack addArrangedSubview:[self popupRow:@"选择策略" key:@"rotation_strategy" titles:@[@"额度优先", @"轮询"] values:@[@"most_available", @"round_robin"]]];
+    [stack addArrangedSubview:[self boolRow:@"自动刷新额度" key:@"quota_tracker_enabled"]];
+    [stack addArrangedSubview:[self integerRow:@"刷新间隔（秒）" key:@"quota_refresh_interval" min:30 max:86400]];
+    [stack addArrangedSubview:[self numberRow:@"5h 权重" key:@"quota_weight_5h" min:0 max:1 decimals:3]];
+    [stack addArrangedSubview:[self numberRow:@"7d 权重" key:@"quota_weight_7d" min:0 max:1 decimals:3]];
+    return stack;
+}
+
+- (NSStackView *)advancedStack {
+    NSStackView *stack = [self baseStack];
+    [stack addArrangedSubview:[self sectionLabel:@"代理行为"]];
+    [stack addArrangedSubview:[self popupRow:@"产品模式" key:@"product_mode" titles:@[@"标准", @"兼容", @"诊断"] values:@[@"standard", @"compatibility", @"diagnostic"]]];
+    [stack addArrangedSubview:[self popupRow:@"Codex 流模式" key:@"codex_stream_mode" titles:@[@"实时", @"缓冲", @"混合"] values:@[@"realtime", @"buffered", @"hybrid"]]];
+    [stack addArrangedSubview:[self integerRow:@"限流冷却（秒）" key:@"rate_limit_cooldown" min:1 max:3600]];
+    [stack addArrangedSubview:[self integerRow:@"最大重试" key:@"max_retries" min:1 max:50]];
+    [stack addArrangedSubview:[self integerRow:@"请求体上限（MB）" key:@"max_request_body_mb" min:1 max:1024]];
+
+    [stack addArrangedSubview:[self sectionLabel:@"上游网络"]];
+    [stack addArrangedSubview:[self integerRow:@"连接超时（秒）" key:@"upstream_connect_timeout_sec" min:1 max:60]];
+    [stack addArrangedSubview:[self integerRow:@"瞬时重试" key:@"upstream_transient_retries" min:0 max:5]];
+    [stack addArrangedSubview:[self integerRow:@"退避（ms）" key:@"upstream_transient_backoff_ms" min:0 max:5000]];
+
+    [stack addArrangedSubview:[self sectionLabel:@"流与会话"]];
+    [stack addArrangedSubview:[self integerRow:@"混合探测（秒）" key:@"codex_hybrid_probe_seconds" min:0 max:120]];
+    [stack addArrangedSubview:[self integerRow:@"混合探测（bytes）" key:@"codex_hybrid_probe_bytes" min:1024 max:10485760]];
+    [stack addArrangedSubview:[self integerRow:@"流重试冷却（秒）" key:@"codex_stream_retry_cooldown" min:0 max:3600]];
+    [stack addArrangedSubview:[self integerRow:@"Stream keepalive" key:@"stream_keepalive_seconds" min:0 max:300]];
+    [stack addArrangedSubview:[self integerRow:@"Bootstrap retries" key:@"stream_bootstrap_retries" min:0 max:5]];
+    [stack addArrangedSubview:[self integerRow:@"Nonstream keepalive" key:@"nonstream_keepalive_interval" min:0 max:300]];
+    [stack addArrangedSubview:[self integerRow:@"WebSocket heartbeat" key:@"websocket_heartbeat_seconds" min:0 max:300]];
+    [stack addArrangedSubview:[self boolRow:@"Session affinity" key:@"session_affinity_enabled"]];
+    [stack addArrangedSubview:[self integerRow:@"Affinity TTL（秒）" key:@"session_affinity_ttl_seconds" min:60 max:86400]];
+    return stack;
+}
+
+- (NSStackView *)diagnosticsStack {
+    NSStackView *stack = [self baseStack];
+    [stack addArrangedSubview:[self sectionLabel:@"路径与版本"]];
+    self.diagnosticsLabel = [self detailLabel:@"正在读取诊断信息..."];
+    [stack addArrangedSubview:self.diagnosticsLabel];
+    [stack addArrangedSubview:[self buttonGridWithButtons:@[
+        [self ownerButton:@"打开日志" symbol:@"doc.text.magnifyingglass" action:@selector(openLogAction:)],
+        [self ownerButton:@"打开结果文件" symbol:@"doc" action:@selector(openResultAction:)],
+        [self ownerButton:@"路径与依赖" symbol:@"folder.badge.gearshape" action:@selector(showPathsAction:)],
+    ] columns:3]];
+    return stack;
+}
+
+- (NSTextField *)label:(NSString *)text size:(CGFloat)size weight:(NSFontWeight)weight color:(NSColor *)color {
+    NSTextField *label = [NSTextField labelWithString:text ?: @""];
+    label.font = [NSFont systemFontOfSize:size weight:weight];
+    label.textColor = color ?: NSColor.labelColor;
+    label.lineBreakMode = NSLineBreakByWordWrapping;
+    label.maximumNumberOfLines = 0;
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    return label;
+}
+
+- (NSTextField *)sectionLabel:(NSString *)text {
+    return [self label:text size:14 weight:NSFontWeightBold color:NSColor.labelColor];
+}
+
+- (NSTextField *)detailLabel:(NSString *)text {
+    return [self label:text size:12 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
+}
+
+- (NSButton *)button:(NSString *)title symbol:(NSString *)symbol action:(SEL)action {
+    NSButton *button = [NSButton buttonWithTitle:title target:self action:action];
+    button.bezelStyle = NSBezelStyleRounded;
+    button.controlSize = NSControlSizeRegular;
+    button.imagePosition = NSImageLeading;
+    button.font = [NSFont systemFontOfSize:13 weight:NSFontWeightRegular];
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    NSImage *image = [self symbolImageNamed:symbol];
+    if (image) {
+        button.image = image;
+    }
+    [button.heightAnchor constraintEqualToConstant:30].active = YES;
+    return button;
+}
+
+- (NSButton *)ownerButton:(NSString *)title symbol:(NSString *)symbol action:(SEL)action {
+    NSButton *button = [self button:title symbol:symbol action:@selector(ownerButtonAction:)];
+    button.target = self;
+    button.identifier = NSStringFromSelector(action);
+    return button;
+}
+
+- (void)ownerButtonAction:(NSButton *)sender {
+    SEL selector = NSSelectorFromString(CPString(sender.identifier));
+    if (selector == @selector(repairAction:)) {
+        [self.owner repairAction:sender];
+    } else if (selector == @selector(openCodexAction:)) {
+        [self.owner openCodexAction:sender];
+    } else if (selector == @selector(openWebAction:)) {
+        [self.owner openWebAction:sender];
+    } else if (selector == @selector(openLogAction:)) {
+        [self.owner openLogAction:sender];
+    } else if (selector == @selector(openResultAction:)) {
+        [self.owner openResultAction:sender];
+    } else if (selector == @selector(showPathsAction:)) {
+        [self.owner showPathsAction:sender];
+    }
+}
+
+- (NSImage *)symbolImageNamed:(NSString *)name {
+    if (@available(macOS 11.0, *)) {
+        return [NSImage imageWithSystemSymbolName:name accessibilityDescription:name];
+    }
+    return nil;
+}
+
+- (NSStackView *)rowWithTitle:(NSString *)title control:(NSView *)control {
+    NSStackView *row = [[NSStackView alloc] init];
+    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row.alignment = NSLayoutAttributeCenterY;
+    row.spacing = 12;
+    NSTextField *label = [self label:title size:12 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
+    [label.widthAnchor constraintEqualToConstant:150].active = YES;
+    [row addArrangedSubview:label];
+    [row addArrangedSubview:control];
+    return row;
+}
+
+- (NSStackView *)buttonGridWithButtons:(NSArray<NSButton *> *)buttons columns:(NSInteger)columns {
+    NSStackView *grid = [[NSStackView alloc] init];
+    grid.orientation = NSUserInterfaceLayoutOrientationVertical;
+    grid.spacing = 8;
+    NSInteger index = 0;
+    while (index < (NSInteger)buttons.count) {
+        NSStackView *row = [[NSStackView alloc] init];
+        row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+        row.spacing = 8;
+        row.distribution = NSStackViewDistributionFillEqually;
+        for (NSInteger col = 0; col < columns && index < (NSInteger)buttons.count; col++, index++) {
+            [row addArrangedSubview:buttons[index]];
+        }
+        [grid addArrangedSubview:row];
+    }
+    return grid;
+}
+
+- (NSStackView *)popupRow:(NSString *)title key:(NSString *)key titles:(NSArray<NSString *> *)titles values:(NSArray<NSString *> *)values {
+    NSPopUpButton *popup = [[NSPopUpButton alloc] init];
+    popup.translatesAutoresizingMaskIntoConstraints = NO;
+    for (NSInteger i = 0; i < (NSInteger)titles.count; i++) {
+        [popup addItemWithTitle:titles[i]];
+        popup.lastItem.representedObject = i < (NSInteger)values.count ? values[i] : titles[i];
+    }
+    [popup.widthAnchor constraintGreaterThanOrEqualToConstant:180].active = YES;
+    self.controls[key] = popup;
+    return [self rowWithTitle:title control:popup];
+}
+
+- (NSStackView *)boolRow:(NSString *)title key:(NSString *)key {
+    NSButton *check = [NSButton checkboxWithTitle:@"" target:nil action:nil];
+    check.translatesAutoresizingMaskIntoConstraints = NO;
+    self.controls[key] = check;
+    return [self rowWithTitle:title control:check];
+}
+
+- (NSStackView *)integerRow:(NSString *)title key:(NSString *)key min:(NSInteger)min max:(NSInteger)max {
+    NSTextField *field = [self numberFieldWithDecimals:0 min:min max:max];
+    self.controls[key] = field;
+    return [self rowWithTitle:title control:field];
+}
+
+- (NSStackView *)numberRow:(NSString *)title key:(NSString *)key min:(double)min max:(double)max decimals:(NSUInteger)decimals {
+    NSTextField *field = [self numberFieldWithDecimals:decimals min:min max:max];
+    self.controls[key] = field;
+    return [self rowWithTitle:title control:field];
+}
+
+- (NSTextField *)numberFieldWithDecimals:(NSUInteger)decimals min:(double)min max:(double)max {
+    NSTextField *field = [[NSTextField alloc] init];
+    field.translatesAutoresizingMaskIntoConstraints = NO;
+    [field.widthAnchor constraintEqualToConstant:180].active = YES;
+    NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
+    formatter.numberStyle = NSNumberFormatterDecimalStyle;
+    formatter.minimum = @(min);
+    formatter.maximum = @(max);
+    formatter.minimumFractionDigits = 0;
+    formatter.maximumFractionDigits = decimals;
+    formatter.allowsFloats = decimals > 0;
+    field.formatter = formatter;
+    return field;
+}
+
+- (NSDictionary *)defaultConfig {
+    return @{
+        @"port": @8800,
+        @"rate_limit_cooldown": @60,
+        @"rotation_strategy": @"most_available",
+        @"product_mode": @"standard",
+        @"max_retries": @10,
+        @"quota_refresh_interval": @300,
+        @"quota_tracker_enabled": @(YES),
+        @"max_request_body_mb": @512,
+        @"upstream_connect_timeout_sec": @10,
+        @"upstream_transient_retries": @2,
+        @"upstream_transient_backoff_ms": @250,
+        @"codex_stream_mode": @"realtime",
+        @"codex_hybrid_probe_seconds": @8,
+        @"codex_hybrid_probe_bytes": @262144,
+        @"codex_stream_retry_cooldown": @0,
+        @"stream_keepalive_seconds": @15,
+        @"stream_bootstrap_retries": @1,
+        @"nonstream_keepalive_interval": @15,
+        @"websocket_heartbeat_seconds": @0,
+        @"session_affinity_enabled": @(YES),
+        @"session_affinity_ttl_seconds": @3600,
+        @"quota_weight_5h": @0.5,
+        @"quota_weight_7d": @0.5,
+        @"log_level": @"INFO",
+    };
+}
+
+- (NSDictionary *)fieldTypes {
+    return @{
+        @"quota_weight_5h": @"float",
+        @"quota_weight_7d": @"float",
+        @"quota_tracker_enabled": @"bool",
+        @"session_affinity_enabled": @"bool",
+        @"rotation_strategy": @"string",
+        @"product_mode": @"string",
+        @"codex_stream_mode": @"string",
+        @"log_level": @"string",
+    };
+}
+
+- (void)refresh:(id)sender {
+    self.statusLabel.stringValue = @"正在读取设置...";
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSDictionary *config = [self fetchJSONPath:@"/api/config" method:@"GET" body:nil timeout:3.0];
+        NSDictionary *status = [self.owner fetchJSONPath:@"/api/status" method:@"GET" timeout:3.0];
+        NSDictionary *codex = [self.owner fetchJSONPath:@"/api/codex/proxy" method:@"GET" timeout:3.0];
+        if (!status) {
+            NSString *raw = nil;
+            status = [self.owner runPythonJSONSync:@[@"status"] rawText:&raw];
+        }
+        if (!config) {
+            config = CPDict(status[@"config"]);
+        }
+        if (!codex) {
+            codex = @{
+                @"enabled": status[@"enabled"] ?: @(NO),
+                @"mode": status[@"mode"] ?: @"",
+                @"expected": @{
+                    @"codex_base_url": status[@"codex_expected_base_url"] ?: @"",
+                },
+            };
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.configSnapshot = config ?: @{};
+            self.statusSnapshot = status ?: @{};
+            self.codexSnapshot = codex ?: @{};
+            [self populateControls];
+            [self scrollAllTabsToTop];
+            self.statusLabel.stringValue = @"设置已读取";
+            [self auditButtonsInWindow:self.window context:@"settings-refresh"];
+        });
+    });
+}
+
+- (void)scrollAllTabsToTop {
+    for (NSScrollView *scroll in self.scrollViews) {
+        [scroll.documentView layoutSubtreeIfNeeded];
+        NSClipView *clip = scroll.contentView;
+        [clip scrollToPoint:NSMakePoint(0, 0)];
+        [scroll reflectScrolledClipView:clip];
+    }
+}
+
+- (void)populateControls {
+    NSDictionary *config = self.configSnapshot.count ? self.configSnapshot : [self defaultConfig];
+    for (NSString *key in self.controls) {
+        NSControl *control = self.controls[key];
+        id value = config[key] ?: [self defaultConfig][key];
+        if ([control isKindOfClass:NSPopUpButton.class]) {
+            NSPopUpButton *popup = (NSPopUpButton *)control;
+            NSInteger targetIndex = -1;
+            for (NSInteger i = 0; i < (NSInteger)popup.numberOfItems; i++) {
+                if ([CPString([popup itemAtIndex:i].representedObject) isEqualToString:CPString(value)]) {
+                    targetIndex = i;
+                    break;
+                }
+            }
+            if (targetIndex >= 0) {
+                [popup selectItemAtIndex:targetIndex];
+            }
+        } else if ([control isKindOfClass:NSButton.class]) {
+            ((NSButton *)control).state = CPBool(value) ? NSControlStateValueOn : NSControlStateValueOff;
+        } else if ([control isKindOfClass:NSTextField.class]) {
+            ((NSTextField *)control).doubleValue = CPDouble(value);
+        }
+    }
+
+    BOOL proxyEnabled = CPBool(self.codexSnapshot[@"enabled"]) || CPBool(self.statusSnapshot[@"enabled"]);
+    self.proxyModeControl.selectedSegment = proxyEnabled ? 0 : 1;
+    NSString *mode = CPString(self.codexSnapshot[@"mode"]);
+    if (!mode.length) {
+        mode = CPString(self.statusSnapshot[@"mode"]);
+    }
+    self.codexLabel.stringValue = [NSString stringWithFormat:@"当前：%@ · %@",
+                                   proxyEnabled ? @"账号池代理" : @"直连",
+                                   mode.length ? mode : @"unknown"];
+    NSDictionary *expected = CPDict(self.codexSnapshot[@"expected"]);
+    NSString *base = CPString(expected[@"codex_base_url"]);
+    if (!base.length) {
+        base = CPString(self.statusSnapshot[@"codex_expected_base_url"]);
+    }
+    self.baseURLLabel.stringValue = [NSString stringWithFormat:@"预期 base URL：%@", base.length ? base : @"-"];
+
+    BOOL running = CPBool(self.statusSnapshot[@"running"]);
+    self.serviceLabel.stringValue = [NSString stringWithFormat:@"后台：%@ · 可用账号 %@/%@ · 版本 %@",
+                                     running ? @"在线" : @"离线",
+                                     CPDisplayString(self.statusSnapshot[@"active_accounts"]),
+                                     CPDisplayString(self.statusSnapshot[@"total_accounts"]),
+                                     CPDisplayString(self.statusSnapshot[@"proxy_version"])];
+    self.diagnosticsLabel.stringValue = [NSString stringWithFormat:@"运行目录：%@\n资源目录：%@\n前台版本：%@\n运行版本：%@\n后台版本：%@\nManifest：%@",
+                                         CPDisplayString(self.statusSnapshot[@"runtime_dir"]),
+                                         CPDisplayString(self.statusSnapshot[@"source_dir"]),
+                                         CPDisplayString(self.owner.frontendVersion),
+                                         CPDisplayString(self.statusSnapshot[@"runtime_version"]),
+                                         CPDisplayString(self.statusSnapshot[@"proxy_version"]),
+                                         CPBool(self.statusSnapshot[@"manifest_ok"]) ? @"一致" : CPDisplayString(self.statusSnapshot[@"manifest_error"])];
+}
+
+- (NSDictionary *)configFromControls {
+    NSMutableDictionary *updates = [NSMutableDictionary dictionary];
+    NSDictionary *types = [self fieldTypes];
+    for (NSString *key in self.controls) {
+        NSControl *control = self.controls[key];
+        NSString *type = CPString(types[key]);
+        if ([control isKindOfClass:NSPopUpButton.class]) {
+            updates[key] = CPDisplayString(((NSPopUpButton *)control).selectedItem.representedObject);
+        } else if ([control isKindOfClass:NSButton.class] || [type isEqualToString:@"bool"]) {
+            updates[key] = @(((NSButton *)control).state == NSControlStateValueOn);
+        } else if ([type isEqualToString:@"float"]) {
+            updates[key] = @(((NSTextField *)control).doubleValue);
+        } else {
+            updates[key] = @((NSInteger)llround(((NSTextField *)control).doubleValue));
+        }
+    }
+    return updates;
+}
+
+- (void)save:(id)sender {
+    NSDictionary *updates = [self configFromControls];
+    BOOL desiredProxy = self.proxyModeControl.selectedSegment != 1;
+    BOOL currentProxy = CPBool(self.codexSnapshot[@"enabled"]) || CPBool(self.statusSnapshot[@"enabled"]);
+    self.statusLabel.stringValue = @"正在保存设置...";
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *jsonError = nil;
+        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:updates options:0 error:&jsonError];
+        NSString *json = jsonData ? [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] : @"{}";
+        NSDictionary *result = nil;
+        if (!jsonError) {
+            result = [self fetchJSONPath:@"/api/config" method:@"PUT" body:jsonData timeout:5.0];
+        }
+        if (!result || result[@"error"]) {
+            NSString *raw = nil;
+            result = [self.owner runPythonJSONSync:@[@"set-config", @"--config-json", json ?: @"{}"] rawText:&raw];
+        }
+
+        NSDictionary *proxyResult = nil;
+        if (desiredProxy != currentProxy) {
+            NSData *proxyBody = [NSJSONSerialization dataWithJSONObject:@{@"enabled": @(desiredProxy)} options:0 error:nil];
+            proxyResult = [self fetchJSONPath:@"/api/codex/proxy" method:@"PUT" body:proxyBody timeout:5.0];
+            if (!proxyResult || proxyResult[@"error"]) {
+                NSString *raw = nil;
+                proxyResult = [self.owner runPythonJSONSync:@[desiredProxy ? @"enable-codex-proxy" : @"disable-codex-proxy"] rawText:&raw];
+            }
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString *errorText = CPString(result[@"error"]);
+            if (errorText.length) {
+                self.statusLabel.stringValue = [NSString stringWithFormat:@"保存失败：%@", errorText];
+                [self.owner appendLog:[NSString stringWithFormat:@"设置保存失败\n%@", CPPrettyJSON(result)]];
+                return;
+            }
+            BOOL restartRequired = CPBool(result[@"restart_required"]);
+            NSString *proxyError = CPString(proxyResult[@"error"]);
+            self.statusLabel.stringValue = proxyError.length
+                ? [NSString stringWithFormat:@"设置已保存，代理模式切换失败：%@", proxyError]
+                : (restartRequired ? @"设置已保存；端口变更需要重启后台生效" : @"设置已保存");
+            [self.owner appendLog:[NSString stringWithFormat:@"设置保存\n%@\n%@", CPPrettyJSON(result), proxyResult ? CPPrettyJSON(proxyResult) : @""]];
+            [self.owner refreshSnapshots:nil];
+            [self refresh:nil];
+        });
+    });
+}
+
+- (void)restoreDefaults:(id)sender {
+    self.configSnapshot = [self defaultConfig];
+    [self populateControls];
+    self.statusLabel.stringValue = @"已填入默认值，点击“保存设置”后生效";
+}
+
+- (NSDictionary *)fetchJSONPath:(NSString *)path method:(NSString *)method body:(NSData *)body timeout:(NSTimeInterval)timeout {
+    NSString *urlString = [@"http://127.0.0.1:8800" stringByAppendingString:path];
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (!url) {
+        return nil;
+    }
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:timeout];
+    request.HTTPMethod = method ?: @"GET";
+    if (body) {
+        request.HTTPBody = body;
+        [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    } else if (![request.HTTPMethod isEqualToString:@"GET"]) {
+        request.HTTPBody = [NSData data];
+    }
+
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block NSData *responseData = nil;
+    NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:request
+                                                               completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+        if (!error && http.statusCode >= 200 && http.statusCode < 500) {
+            responseData = data;
+        }
+        dispatch_semaphore_signal(semaphore);
+    }];
+    [task resume];
+    dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)((timeout + 1.0) * NSEC_PER_SEC)));
+    if (!responseData) {
+        [task cancel];
+        return nil;
+    }
+    id parsed = [NSJSONSerialization JSONObjectWithData:responseData options:0 error:nil];
+    return [parsed isKindOfClass:NSDictionary.class] ? parsed : nil;
+}
+
+- (void)auditButtonsInWindow:(NSWindow *)window context:(NSString *)context {
+    NSMutableArray<NSButton *> *buttons = [NSMutableArray array];
+    [self collectButtonsFromView:window.contentView into:buttons];
+    NSMutableArray<NSString *> *issues = [NSMutableArray array];
+    for (NSInteger i = 0; i < (NSInteger)buttons.count; i++) {
+        NSButton *a = buttons[i];
+        if (a.hidden || a.alphaValue <= 0.01) {
+            continue;
+        }
+        NSRect af = [a.superview convertRect:a.frame toView:nil];
+        CGFloat needed = a.intrinsicContentSize.width;
+        if (needed > 0 && af.size.width > 0 && needed > af.size.width + 3) {
+            [issues addObject:[NSString stringWithFormat:@"裁切：%@ need %.0f > %.0f", a.title, needed, af.size.width]];
+        }
+        for (NSInteger j = i + 1; j < (NSInteger)buttons.count; j++) {
+            NSButton *b = buttons[j];
+            if (b.hidden || b.alphaValue <= 0.01) {
+                continue;
+            }
+            NSRect bf = [b.superview convertRect:b.frame toView:nil];
+            NSRect inter = NSIntersectionRect(af, bf);
+            if (!NSIsEmptyRect(inter) && inter.size.width * inter.size.height > 4) {
+                [issues addObject:[NSString stringWithFormat:@"重叠：%@ / %@", a.title, b.title]];
+            }
+        }
+    }
+    if (issues.count) {
+        [self.owner appendLog:[NSString stringWithFormat:@"布局巡检 %@\n%@", context, [issues componentsJoinedByString:@"\n"]]];
+    }
+}
+
+- (void)collectButtonsFromView:(NSView *)view into:(NSMutableArray<NSButton *> *)buttons {
+    if ([view isKindOfClass:NSButton.class]) {
+        [buttons addObject:(NSButton *)view];
+    }
+    for (NSView *subview in view.subviews) {
+        [self collectButtonsFromView:subview into:buttons];
+    }
+}
+
+@end
+
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @property(nonatomic, strong) ControlWindowController *controller;
 @end
@@ -3858,7 +4670,37 @@ static NSColor *CPSidebarBorderColor(void) {
 @implementation AppDelegate
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     self.controller = [[ControlWindowController alloc] init];
+    [self installMainMenu];
     [self.controller show];
+}
+- (void)installMainMenu {
+    NSString *appName = CPDisplayString(NSBundle.mainBundle.infoDictionary[@"CFBundleName"]);
+    NSMenu *mainMenu = [[NSMenu alloc] initWithTitle:@""];
+    NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:@"" action:nil keyEquivalent:@""];
+    [mainMenu addItem:appItem];
+
+    NSMenu *appMenu = [[NSMenu alloc] initWithTitle:appName];
+    NSMenuItem *settings = [[NSMenuItem alloc] initWithTitle:@"设置..."
+                                                      action:@selector(showSettings:)
+                                               keyEquivalent:@","];
+    settings.target = self.controller;
+    [appMenu addItem:settings];
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    [appMenu addItemWithTitle:[NSString stringWithFormat:@"隐藏 %@", appName]
+                       action:@selector(hide:)
+                keyEquivalent:@"h"];
+    NSMenuItem *hideOthers = [[NSMenuItem alloc] initWithTitle:@"隐藏其他"
+                                                        action:@selector(hideOtherApplications:)
+                                                 keyEquivalent:@"h"];
+    hideOthers.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    [appMenu addItem:hideOthers];
+    [appMenu addItemWithTitle:@"全部显示" action:@selector(unhideAllApplications:) keyEquivalent:@""];
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    [appMenu addItemWithTitle:[NSString stringWithFormat:@"退出 %@", appName]
+                       action:@selector(terminate:)
+                keyEquivalent:@"q"];
+    appItem.submenu = appMenu;
+    NSApp.mainMenu = mainMenu;
 }
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
     return YES;

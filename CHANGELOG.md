@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.6.6 - 2026-06-15
+
+- Fixed reopening the macOS Settings window after it has been closed.
+- Changed weekly token activity heatmaps to light up by active usage days instead of weekly token volume.
+- Added the same daily/weekly heatmap view behavior to the Web status page and synced the packaged macOS runtime copy.
+
 ## v0.6.5 - 2026-06-14
 
 - Aligned the macOS control app sidebar navigation icons, labels, and titlebar traffic-light buttons to a consistent visual axis.

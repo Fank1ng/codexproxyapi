@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.6.5",
+    [string]$Version = "0.6.6",
     [switch]$SkipPip,
     [switch]$SkipInstaller,
     [string]$Python = "python"
