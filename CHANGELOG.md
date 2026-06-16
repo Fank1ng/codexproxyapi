@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.7.4 - 2026-06-17
+
+- Fixed the macOS menu bar status and quota rows by rendering them as white custom menu item views.
+- Fixed the control center detail panel background and corner mask so the header matches the content, the upper-left corner is rounded, and the lower-left corner stays square.
+
 ## v0.7.3 - 2026-06-17
 
 - Fixed macOS control center and settings surfaces so dynamic light/dark colors refresh after system appearance changes.

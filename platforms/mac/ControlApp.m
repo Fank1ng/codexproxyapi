@@ -233,7 +233,7 @@ static NSColor *CPSettingsContentBackgroundColor(void) {
 static NSColor *CPSettingsHeaderBackgroundColor(void) {
     return CPDynamicAquaColor(@"CPSettingsHeaderBackgroundColor",
                              [NSColor colorWithCalibratedWhite:0.985 alpha:1.0],
-                             [NSColor colorWithCalibratedWhite:0.12 alpha:1.0]);
+                             [NSColor colorWithCalibratedWhite:0.095 alpha:1.0]);
 }
 
 static CGColorRef CPCGColorForColorInAppearance(NSColor *color, NSAppearance *appearance) {
@@ -294,16 +294,28 @@ static NSImage *CPMenuBarIconImage(void) {
     return image;
 }
 
-static void CPSetWhiteMenuItemTitle(NSMenuItem *item, NSString *title) {
-    if (!item) {
-        return;
+static NSMenuItem *CPWhiteMenuDisplayItem(NSString *title, NSTextField **labelOut) {
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:@"" action:nil keyEquivalent:@""];
+    item.enabled = NO;
+
+    NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 420, 24)];
+    NSTextField *label = [NSTextField labelWithString:title ?: @""];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.font = [NSFont menuFontOfSize:0];
+    label.textColor = NSColor.whiteColor;
+    label.lineBreakMode = NSLineBreakByTruncatingTail;
+    label.maximumNumberOfLines = 1;
+    [view addSubview:label];
+    [NSLayoutConstraint activateConstraints:@[
+        [label.leadingAnchor constraintEqualToAnchor:view.leadingAnchor constant:16],
+        [label.trailingAnchor constraintEqualToAnchor:view.trailingAnchor constant:-16],
+        [label.centerYAnchor constraintEqualToAnchor:view.centerYAnchor],
+    ]];
+    item.view = view;
+    if (labelOut) {
+        *labelOut = label;
     }
-    NSString *text = title ?: @"";
-    item.title = text;
-    item.attributedTitle = [[NSAttributedString alloc] initWithString:text attributes:@{
-        NSFontAttributeName: [NSFont menuFontOfSize:0],
-        NSForegroundColorAttributeName: NSColor.whiteColor,
-    }];
+    return item;
 }
 
 @class ControlWindowController;
@@ -4755,7 +4767,7 @@ static void CPSetWhiteMenuItemTitle(NSMenuItem *item, NSString *title) {
     detailPanel.layer.cornerRadius = 16;
     detailPanel.layer.masksToBounds = YES;
     if (@available(macOS 10.13, *)) {
-        detailPanel.layer.maskedCorners = kCALayerMinXMinYCorner;
+        detailPanel.layer.maskedCorners = kCALayerMinXMaxYCorner;
     }
     detailPanel.translatesAutoresizingMaskIntoConstraints = NO;
     [root addSubview:detailPanel];
@@ -5544,7 +5556,7 @@ static void CPSetWhiteMenuItemTitle(NSMenuItem *item, NSString *title) {
 - (NSView *)settingsPaneHeaderWithTitle:(NSString *)title subtitle:(NSString *)subtitle {
     CPThemedView *header = [[CPThemedView alloc] init];
     header.wantsLayer = YES;
-    header.cpBackgroundColor = CPSettingsHeaderBackgroundColor();
+    header.cpBackgroundColor = CPSettingsContentBackgroundColor();
     header.cpBorderColor = NSColor.clearColor;
     header.layer.borderWidth = 0;
     header.layer.cornerRadius = 0;
@@ -6373,6 +6385,9 @@ static void CPSetWhiteMenuItemTitle(NSMenuItem *item, NSString *title) {
 @property(nonatomic, strong) NSMenuItem *statusMenuItem;
 @property(nonatomic, strong) NSMenuItem *quota5hMenuItem;
 @property(nonatomic, strong) NSMenuItem *quota7dMenuItem;
+@property(nonatomic, strong) NSTextField *statusMenuLabel;
+@property(nonatomic, strong) NSTextField *quota5hMenuLabel;
+@property(nonatomic, strong) NSTextField *quota7dMenuLabel;
 @property(nonatomic, strong) NSTimer *statusRefreshTimer;
 @property(nonatomic, assign) BOOL launchAsMenuBarOnly;
 @end
@@ -6411,17 +6426,17 @@ static void CPSetWhiteMenuItemTitle(NSMenuItem *item, NSString *title) {
     button.action = @selector(showStatusMenu:);
 
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"小腊肠"];
-    self.statusMenuItem = [[NSMenuItem alloc] initWithTitle:@"读取中 · -/- 账号" action:nil keyEquivalent:@""];
-    self.statusMenuItem.enabled = NO;
-    CPSetWhiteMenuItemTitle(self.statusMenuItem, self.statusMenuItem.title);
+    NSTextField *statusMenuLabel = nil;
+    self.statusMenuItem = CPWhiteMenuDisplayItem(@"读取中 · -/- 账号", &statusMenuLabel);
+    self.statusMenuLabel = statusMenuLabel;
     [menu addItem:self.statusMenuItem];
-    self.quota5hMenuItem = [[NSMenuItem alloc] initWithTitle:@"5h 剩余 额度待刷新" action:nil keyEquivalent:@""];
-    self.quota5hMenuItem.enabled = NO;
-    CPSetWhiteMenuItemTitle(self.quota5hMenuItem, self.quota5hMenuItem.title);
+    NSTextField *quota5hMenuLabel = nil;
+    self.quota5hMenuItem = CPWhiteMenuDisplayItem(@"5h 剩余 额度待刷新", &quota5hMenuLabel);
+    self.quota5hMenuLabel = quota5hMenuLabel;
     [menu addItem:self.quota5hMenuItem];
-    self.quota7dMenuItem = [[NSMenuItem alloc] initWithTitle:@"7d 剩余 额度待刷新" action:nil keyEquivalent:@""];
-    self.quota7dMenuItem.enabled = NO;
-    CPSetWhiteMenuItemTitle(self.quota7dMenuItem, self.quota7dMenuItem.title);
+    NSTextField *quota7dMenuLabel = nil;
+    self.quota7dMenuItem = CPWhiteMenuDisplayItem(@"7d 剩余 额度待刷新", &quota7dMenuLabel);
+    self.quota7dMenuLabel = quota7dMenuLabel;
     [menu addItem:self.quota7dMenuItem];
     [menu addItem:[NSMenuItem separatorItem]];
 
@@ -6493,9 +6508,9 @@ static void CPSetWhiteMenuItemTitle(NSMenuItem *item, NSString *title) {
             NSString *state = running ? @"在线" : @"离线";
             NSString *active = CPDisplayString(self.controller.statusSnapshot[@"active_accounts"]);
             NSString *total = CPDisplayString(self.controller.statusSnapshot[@"total_accounts"]);
-            CPSetWhiteMenuItemTitle(self.statusMenuItem, [NSString stringWithFormat:@"%@ · %@/%@ 账号", state, active, total]);
-            CPSetWhiteMenuItemTitle(self.quota5hMenuItem, [self quotaMenuTitleForWeekly:NO]);
-            CPSetWhiteMenuItemTitle(self.quota7dMenuItem, [self quotaMenuTitleForWeekly:YES]);
+            self.statusMenuLabel.stringValue = [NSString stringWithFormat:@"%@ · %@/%@ 账号", state, active, total];
+            self.quota5hMenuLabel.stringValue = [self quotaMenuTitleForWeekly:NO];
+            self.quota7dMenuLabel.stringValue = [self quotaMenuTitleForWeekly:YES];
         });
     });
 }
