@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.7.3 - 2026-06-17
+
+- Fixed macOS control center and settings surfaces so dynamic light/dark colors refresh after system appearance changes.
+- Changed the menu bar status and quota rows to use white text, matching the visible refresh action.
+
 ## v0.7.0 - 2026-06-16
 
 - Changed the macOS Token activity view to show daily, weekly, and cumulative heatmaps stacked vertically at a larger size.

@@ -236,6 +236,21 @@ static NSColor *CPSettingsHeaderBackgroundColor(void) {
                              [NSColor colorWithCalibratedWhite:0.12 alpha:1.0]);
 }
 
+static CGColorRef CPCGColorForColorInAppearance(NSColor *color, NSAppearance *appearance) {
+    if (!color) {
+        return nil;
+    }
+    __block CGColorRef cgColor = nil;
+    NSAppearance *effective = appearance ?: NSApp.effectiveAppearance;
+    [effective performAsCurrentDrawingAppearance:^{
+        NSColor *rgb = [color colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace] ?: color;
+        if (rgb.CGColor) {
+            cgColor = CGColorRetain(rgb.CGColor);
+        }
+    }];
+    return cgColor ? (CGColorRef)CFAutorelease(cgColor) : nil;
+}
+
 static NSNumber *CPJSONBool(BOOL value) {
     return [NSNumber numberWithBool:value];
 }
@@ -277,6 +292,18 @@ static NSImage *CPMenuBarIconImage(void) {
     image.template = NO;
     image.accessibilityDescription = @"小腊肠";
     return image;
+}
+
+static void CPSetWhiteMenuItemTitle(NSMenuItem *item, NSString *title) {
+    if (!item) {
+        return;
+    }
+    NSString *text = title ?: @"";
+    item.title = text;
+    item.attributedTitle = [[NSAttributedString alloc] initWithString:text attributes:@{
+        NSFontAttributeName: [NSFont menuFontOfSize:0],
+        NSForegroundColorAttributeName: NSColor.whiteColor,
+    }];
 }
 
 @class ControlWindowController;
@@ -445,6 +472,17 @@ static NSImage *CPMenuBarIconImage(void) {
 @property(nonatomic, strong) NSColor *cpShadowColor;
 @end
 
+@interface CPThemedVisualEffectView : NSVisualEffectView
+@property(nonatomic, strong) NSColor *cpBackgroundColor;
+@property(nonatomic, strong) NSColor *cpBorderColor;
+@property(nonatomic, strong) NSColor *cpShadowColor;
+@end
+
+@interface CPThemedStackView : NSStackView
+@property(nonatomic, strong) NSColor *cpBackgroundColor;
+@property(nonatomic, strong) NSColor *cpBorderColor;
+@end
+
 @interface CPQuotaRingView : NSView
 @property(nonatomic, assign) double progress;
 @property(nonatomic, copy) NSString *centerText;
@@ -499,18 +537,7 @@ static NSImage *CPMenuBarIconImage(void) {
 }
 
 - (CGColorRef)cpCGColorForColor:(NSColor *)color {
-    if (!color) {
-        return nil;
-    }
-    __block CGColorRef cgColor = nil;
-    NSAppearance *appearance = self.effectiveAppearance ?: NSApp.effectiveAppearance;
-    [appearance performAsCurrentDrawingAppearance:^{
-        NSColor *rgb = [color colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace] ?: color;
-        if (rgb.CGColor) {
-            cgColor = CGColorRetain(rgb.CGColor);
-        }
-    }];
-    return cgColor ? (CGColorRef)CFAutorelease(cgColor) : nil;
+    return CPCGColorForColorInAppearance(color, self.effectiveAppearance);
 }
 
 - (void)cpApplyThemeColors {
@@ -520,6 +547,62 @@ static NSImage *CPMenuBarIconImage(void) {
     self.layer.backgroundColor = [self cpCGColorForColor:self.cpBackgroundColor];
     self.layer.borderColor = [self cpCGColorForColor:self.cpBorderColor];
     self.layer.shadowColor = [self cpCGColorForColor:self.cpShadowColor ?: NSColor.blackColor];
+}
+
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    [self cpApplyThemeColors];
+}
+@end
+
+@implementation CPThemedVisualEffectView
+- (void)setCpBackgroundColor:(NSColor *)cpBackgroundColor {
+    _cpBackgroundColor = cpBackgroundColor;
+    [self cpApplyThemeColors];
+}
+
+- (void)setCpBorderColor:(NSColor *)cpBorderColor {
+    _cpBorderColor = cpBorderColor;
+    [self cpApplyThemeColors];
+}
+
+- (void)setCpShadowColor:(NSColor *)cpShadowColor {
+    _cpShadowColor = cpShadowColor;
+    [self cpApplyThemeColors];
+}
+
+- (void)cpApplyThemeColors {
+    if (!self.layer) {
+        self.wantsLayer = YES;
+    }
+    self.layer.backgroundColor = CPCGColorForColorInAppearance(self.cpBackgroundColor, self.effectiveAppearance);
+    self.layer.borderColor = CPCGColorForColorInAppearance(self.cpBorderColor, self.effectiveAppearance);
+    self.layer.shadowColor = CPCGColorForColorInAppearance(self.cpShadowColor ?: NSColor.blackColor, self.effectiveAppearance);
+}
+
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    [self cpApplyThemeColors];
+}
+@end
+
+@implementation CPThemedStackView
+- (void)setCpBackgroundColor:(NSColor *)cpBackgroundColor {
+    _cpBackgroundColor = cpBackgroundColor;
+    [self cpApplyThemeColors];
+}
+
+- (void)setCpBorderColor:(NSColor *)cpBorderColor {
+    _cpBorderColor = cpBorderColor;
+    [self cpApplyThemeColors];
+}
+
+- (void)cpApplyThemeColors {
+    if (!self.layer) {
+        self.wantsLayer = YES;
+    }
+    self.layer.backgroundColor = CPCGColorForColorInAppearance(self.cpBackgroundColor, self.effectiveAppearance);
+    self.layer.borderColor = CPCGColorForColorInAppearance(self.cpBorderColor, self.effectiveAppearance);
 }
 
 - (void)viewDidChangeEffectiveAppearance {
@@ -987,7 +1070,7 @@ static NSImage *CPMenuBarIconImage(void) {
 }
 
 - (void)buildSidebarInView:(NSView *)sidebar {
-    NSVisualEffectView *panel = [[NSVisualEffectView alloc] init];
+    CPThemedVisualEffectView *panel = [[CPThemedVisualEffectView alloc] init];
     panel.translatesAutoresizingMaskIntoConstraints = NO;
     panel.wantsLayer = YES;
     panel.material = NSVisualEffectMaterialSidebar;
@@ -995,10 +1078,10 @@ static NSImage *CPMenuBarIconImage(void) {
     panel.state = NSVisualEffectStateActive;
     panel.layer.cornerRadius = 14;
     panel.layer.masksToBounds = NO;
-    panel.layer.backgroundColor = [CPSidebarPanelBackgroundColor() colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace].CGColor;
-    panel.layer.borderColor = [CPSidebarBorderColor() colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace].CGColor;
+    panel.cpBackgroundColor = CPSidebarPanelBackgroundColor();
+    panel.cpBorderColor = CPSidebarBorderColor();
     panel.layer.borderWidth = 0.6;
-    panel.layer.shadowColor = NSColor.blackColor.CGColor;
+    panel.cpShadowColor = NSColor.blackColor;
     panel.layer.shadowOpacity = 0.08;
     panel.layer.shadowOffset = CGSizeMake(0, -1);
     panel.layer.shadowRadius = 8;
@@ -4479,9 +4562,11 @@ static NSImage *CPMenuBarIconImage(void) {
     for (NSButton *button in self.navButtons) {
         BOOL selected = button.tag >= 0 && button.tag < ids.count && [ids[button.tag] isEqualToString:self.activeSection];
         button.state = selected ? NSControlStateValueOn : NSControlStateValueOff;
-        button.layer.backgroundColor = selected ? [NSColor.controlAccentColor colorWithAlphaComponent:0.22].CGColor : NSColor.clearColor.CGColor;
+        button.layer.backgroundColor = CPCGColorForColorInAppearance(selected ? [NSColor.controlAccentColor colorWithAlphaComponent:0.22] : NSColor.clearColor,
+                                                                     button.effectiveAppearance);
         button.layer.borderWidth = selected ? 0.5 : 0;
-        button.layer.borderColor = selected ? [NSColor.controlAccentColor colorWithAlphaComponent:0.30].CGColor : NSColor.clearColor.CGColor;
+        button.layer.borderColor = CPCGColorForColorInAppearance(selected ? [NSColor.controlAccentColor colorWithAlphaComponent:0.30] : NSColor.clearColor,
+                                                                 button.effectiveAppearance);
         button.contentTintColor = selected ? NSColor.controlAccentColor : NSColor.labelColor;
         NSUInteger index = [self.navButtons indexOfObject:button];
         NSColor *tint = selected ? NSColor.controlAccentColor : NSColor.labelColor;
@@ -4530,6 +4615,13 @@ static NSImage *CPMenuBarIconImage(void) {
     [self renderSettingsSectionAtIndex:self.selectedSettingsIndex];
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
+    [NSDistributedNotificationCenter.defaultCenter removeObserver:self
+                                                             name:@"AppleInterfaceThemeChangedNotification"
+                                                           object:nil];
+    [NSDistributedNotificationCenter.defaultCenter addObserver:self
+                                                      selector:@selector(systemAppearanceChanged:)
+                                                          name:@"AppleInterfaceThemeChangedNotification"
+                                                        object:nil];
     [self refresh:nil];
     dispatch_async(dispatch_get_main_queue(), ^{
         [self scrollAllTabsToTopAfterLayout];
@@ -4697,21 +4789,21 @@ static NSImage *CPMenuBarIconImage(void) {
     [detail addArrangedSubview:header];
     [header.heightAnchor constraintEqualToConstant:48].active = YES;
 
-    self.contentHost = [[NSView alloc] init];
+    self.contentHost = [[CPThemedView alloc] init];
     self.contentHost.wantsLayer = YES;
-    self.contentHost.layer.backgroundColor = [CPSettingsContentBackgroundColor() colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace].CGColor;
+    ((CPThemedView *)self.contentHost).cpBackgroundColor = CPSettingsContentBackgroundColor();
     self.contentHost.translatesAutoresizingMaskIntoConstraints = NO;
     [detail addArrangedSubview:self.contentHost];
 
     [self rebuildSettingsPagesSelectingIndex:0];
 
-    NSStackView *buttons = [[NSStackView alloc] init];
+    CPThemedStackView *buttons = [[CPThemedStackView alloc] init];
     buttons.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     buttons.alignment = NSLayoutAttributeCenterY;
     buttons.spacing = 8;
     buttons.edgeInsets = NSEdgeInsetsMake(6, 14, 6, 14);
     buttons.wantsLayer = YES;
-    buttons.layer.backgroundColor = [CPSettingsContentBackgroundColor() colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace].CGColor;
+    buttons.cpBackgroundColor = CPSettingsContentBackgroundColor();
     self.statusLabel = [self detailLabel:@"控制中心已打开"];
     self.statusLabel.maximumNumberOfLines = 1;
     self.statusLabel.lineBreakMode = NSLineBreakByTruncatingTail;
@@ -4740,6 +4832,9 @@ static NSImage *CPMenuBarIconImage(void) {
     if (notification.object != self.window) {
         return;
     }
+    [NSDistributedNotificationCenter.defaultCenter removeObserver:self
+                                                            name:@"AppleInterfaceThemeChangedNotification"
+                                                          object:nil];
     self.window.delegate = nil;
     self.window = nil;
     self.controls = [NSMutableDictionary dictionary];
@@ -4791,6 +4886,14 @@ static NSImage *CPMenuBarIconImage(void) {
     self.settingsNavButtons = [NSMutableArray array];
     self.settingsNavIconViews = [NSMutableArray array];
     self.settingsNavTitleLabels = [NSMutableArray array];
+}
+
+- (void)systemAppearanceChanged:(NSNotification *)notification {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.window.backgroundColor = CPSettingsContentBackgroundColor();
+        [self renderSettingsSectionAtIndex:self.selectedSettingsIndex];
+        [self.window.contentView layoutSubtreeIfNeeded];
+    });
 }
 
 - (void)addSettingsPageWithStack:(NSStackView *)stack selected:(BOOL)selected {
@@ -4863,12 +4966,12 @@ static NSImage *CPMenuBarIconImage(void) {
 }
 
 - (NSView *)settingsSidebarView {
-    NSVisualEffectView *sidebar = [[NSVisualEffectView alloc] init];
+    CPThemedVisualEffectView *sidebar = [[CPThemedVisualEffectView alloc] init];
     sidebar.material = NSVisualEffectMaterialSidebar;
     sidebar.blendingMode = NSVisualEffectBlendingModeBehindWindow;
     sidebar.state = NSVisualEffectStateActive;
     sidebar.wantsLayer = YES;
-    sidebar.layer.backgroundColor = [CPSidebarPanelBackgroundColor() colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace].CGColor;
+    sidebar.cpBackgroundColor = CPSidebarPanelBackgroundColor();
     sidebar.translatesAutoresizingMaskIntoConstraints = NO;
 
     NSStackView *stack = [[NSStackView alloc] init];
@@ -5003,8 +5106,7 @@ static NSImage *CPMenuBarIconImage(void) {
         BOOL active = button.tag == selected;
         button.state = active ? NSControlStateValueOn : NSControlStateValueOff;
         NSColor *background = active ? [NSColor colorWithCalibratedWhite:0.0 alpha:0.08] : NSColor.clearColor;
-        NSColor *rgb = [background colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace] ?: background;
-        button.layer.backgroundColor = rgb.CGColor;
+        button.layer.backgroundColor = CPCGColorForColorInAppearance(background, button.effectiveAppearance);
         NSColor *tint = active ? NSColor.labelColor : NSColor.secondaryLabelColor;
         NSInteger index = [self.settingsNavButtons indexOfObject:button];
         if (index != NSNotFound && index < (NSInteger)self.settingsNavIconViews.count) {
@@ -6311,12 +6413,15 @@ static NSImage *CPMenuBarIconImage(void) {
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"小腊肠"];
     self.statusMenuItem = [[NSMenuItem alloc] initWithTitle:@"读取中 · -/- 账号" action:nil keyEquivalent:@""];
     self.statusMenuItem.enabled = NO;
+    CPSetWhiteMenuItemTitle(self.statusMenuItem, self.statusMenuItem.title);
     [menu addItem:self.statusMenuItem];
     self.quota5hMenuItem = [[NSMenuItem alloc] initWithTitle:@"5h 剩余 额度待刷新" action:nil keyEquivalent:@""];
     self.quota5hMenuItem.enabled = NO;
+    CPSetWhiteMenuItemTitle(self.quota5hMenuItem, self.quota5hMenuItem.title);
     [menu addItem:self.quota5hMenuItem];
     self.quota7dMenuItem = [[NSMenuItem alloc] initWithTitle:@"7d 剩余 额度待刷新" action:nil keyEquivalent:@""];
     self.quota7dMenuItem.enabled = NO;
+    CPSetWhiteMenuItemTitle(self.quota7dMenuItem, self.quota7dMenuItem.title);
     [menu addItem:self.quota7dMenuItem];
     [menu addItem:[NSMenuItem separatorItem]];
 
@@ -6388,9 +6493,9 @@ static NSImage *CPMenuBarIconImage(void) {
             NSString *state = running ? @"在线" : @"离线";
             NSString *active = CPDisplayString(self.controller.statusSnapshot[@"active_accounts"]);
             NSString *total = CPDisplayString(self.controller.statusSnapshot[@"total_accounts"]);
-            self.statusMenuItem.title = [NSString stringWithFormat:@"%@ · %@/%@ 账号", state, active, total];
-            self.quota5hMenuItem.title = [self quotaMenuTitleForWeekly:NO];
-            self.quota7dMenuItem.title = [self quotaMenuTitleForWeekly:YES];
+            CPSetWhiteMenuItemTitle(self.statusMenuItem, [NSString stringWithFormat:@"%@ · %@/%@ 账号", state, active, total]);
+            CPSetWhiteMenuItemTitle(self.quota5hMenuItem, [self quotaMenuTitleForWeekly:NO]);
+            CPSetWhiteMenuItemTitle(self.quota7dMenuItem, [self quotaMenuTitleForWeekly:YES]);
         });
     });
 }
