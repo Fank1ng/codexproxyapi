@@ -359,6 +359,7 @@ static NSImage *CPMenuBarIconImage(void) {
 @property(nonatomic, strong) NSTextField *footerStatusLabel;
 @property(nonatomic, strong) NSTextField *sidebarStatusLabel;
 @property(nonatomic, strong) NSTextView *outputView;
+@property(nonatomic, strong) NSMutableString *logBuffer;
 @property(nonatomic, strong) NSTableView *accountTable;
 @property(nonatomic, strong) NSMutableArray<NSButton *> *buttons;
 @property(nonatomic, strong) NSMutableArray<NSButton *> *navButtons;
@@ -825,6 +826,7 @@ static NSImage *CPMenuBarIconImage(void) {
     _navButtons = [NSMutableArray array];
     _navIconViews = [NSMutableArray array];
     _navTitleLabels = [NSMutableArray array];
+    _logBuffer = [NSMutableString string];
     _accounts = @[];
     _statusSnapshot = @{};
     _quotaSnapshot = @{};
@@ -1195,6 +1197,7 @@ static NSImage *CPMenuBarIconImage(void) {
 
 - (void)renderLogsSection {
     [self.contentStack addArrangedSubview:[self constrainedContentView:[self recentRequestsCard] width:450]];
+    [self.contentStack addArrangedSubview:[self constrainedContentView:[self logCardWithHeight:160 actions:NO] width:450]];
 }
 
 - (NSView *)dashboardBottomRow {
@@ -2341,27 +2344,29 @@ static NSImage *CPMenuBarIconImage(void) {
     }
 
     NSArray<NSDictionary *> *columns = @[
-        @{@"id": @"name", @"title": @"名称", @"width": @40},
-        @{@"id": @"email", @"title": @"邮箱", @"width": @168},
-        @{@"id": @"state", @"title": @"状态", @"width": @54},
-        @{@"id": @"quota", @"title": @"5h", @"width": @48},
-        @{@"id": @"weekly", @"title": @"7d", @"width": @48},
+        @{@"id": @"name", @"title": @"名称", @"width": @34},
+        @{@"id": @"email", @"title": @"邮箱", @"width": @170},
+        @{@"id": @"state", @"title": @"状态", @"width": @46},
+        @{@"id": @"quota", @"title": @"5h", @"width": @40},
+        @{@"id": @"weekly", @"title": @"7d", @"width": @40},
     ];
     for (NSDictionary *spec in columns) {
         NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:spec[@"id"]];
         column.title = spec[@"title"];
         column.width = [spec[@"width"] doubleValue];
-        column.minWidth = 34;
-        column.resizingMask = NSTableColumnAutoresizingMask;
+        column.minWidth = [spec[@"width"] doubleValue];
+        column.maxWidth = [spec[@"width"] doubleValue];
+        column.resizingMask = NSTableColumnNoResizing;
         BOOL leftAligned = [spec[@"id"] isEqualToString:@"name"] || [spec[@"id"] isEqualToString:@"email"];
         column.headerCell.alignment = leftAligned ? NSTextAlignmentLeft : NSTextAlignmentCenter;
         [self.accountTable addTableColumn:column];
     }
-    self.accountTable.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
+    self.accountTable.columnAutoresizingStyle = NSTableViewNoColumnAutoresizing;
     scroll.documentView = self.accountTable;
     [listPane addArrangedSubview:scroll];
     [scroll.heightAnchor constraintGreaterThanOrEqualToConstant:228].active = YES;
-    [listPane.widthAnchor constraintEqualToAnchor:panes.widthAnchor multiplier:0.56 constant:-6].active = YES;
+    [listPane.widthAnchor constraintEqualToAnchor:panes.widthAnchor multiplier:0.52 constant:-6].active = YES;
+    [listPane.widthAnchor constraintGreaterThanOrEqualToConstant:342].active = YES;
 
     CPThemedView *inspectorPanel = [[CPThemedView alloc] init];
     inspectorPanel.wantsLayer = YES;
@@ -2777,6 +2782,7 @@ static NSImage *CPMenuBarIconImage(void) {
     self.outputView.drawsBackground = NO;
     self.outputView.textColor = NSColor.labelColor;
     self.outputView.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
+    self.outputView.string = self.logBuffer.length ? self.logBuffer : @"暂无活动日志，启动/刷新/操作后会显示。";
     scroll.documentView = self.outputView;
     [stack addArrangedSubview:scroll];
     [scroll.heightAnchor constraintGreaterThanOrEqualToConstant:MAX(32, height - (actions ? 82 : 52))].active = YES;
@@ -4042,16 +4048,18 @@ static NSImage *CPMenuBarIconImage(void) {
 
 - (void)appendLog:(NSString *)text {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!self.outputView) {
-            return;
-        }
         NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
         formatter.dateFormat = @"HH:mm:ss";
         NSString *stamp = [formatter stringFromDate:NSDate.date];
         NSString *line = [NSString stringWithFormat:@"[%@] %@\n", stamp, text ?: @""];
-        NSString *old = self.outputView.string ?: @"";
-        self.outputView.string = [old stringByAppendingString:line];
-        [self.outputView scrollToEndOfDocument:nil];
+        if (!self.logBuffer) {
+            self.logBuffer = [NSMutableString string];
+        }
+        [self.logBuffer appendString:line];
+        if (self.outputView) {
+            self.outputView.string = self.logBuffer.length ? self.logBuffer : @"暂无活动日志，启动/刷新/操作后会显示。";
+            [self.outputView scrollToEndOfDocument:nil];
+        }
     });
 }
 
@@ -4655,7 +4663,7 @@ static NSImage *CPMenuBarIconImage(void) {
     detailPanel.layer.cornerRadius = 16;
     detailPanel.layer.masksToBounds = YES;
     if (@available(macOS 10.13, *)) {
-        detailPanel.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner;
+        detailPanel.layer.maskedCorners = kCALayerMinXMinYCorner;
     }
     detailPanel.translatesAutoresizingMaskIntoConstraints = NO;
     [root addSubview:detailPanel];
@@ -4872,15 +4880,18 @@ static NSImage *CPMenuBarIconImage(void) {
     [sidebar addSubview:stack];
     [NSLayoutConstraint activateConstraints:@[
         [stack.leadingAnchor constraintEqualToAnchor:sidebar.leadingAnchor],
-        [stack.trailingAnchor constraintEqualToAnchor:sidebar.trailingAnchor],
+        [stack.widthAnchor constraintEqualToConstant:188],
         [stack.topAnchor constraintEqualToAnchor:sidebar.topAnchor],
         [stack.bottomAnchor constraintEqualToAnchor:sidebar.bottomAnchor],
     ]];
 
     NSTextField *title = [self label:@"控制中心" size:16 weight:NSFontWeightSemibold color:NSColor.labelColor];
+    title.alignment = NSTextAlignmentLeft;
     [stack addArrangedSubview:title];
 
-    [stack addArrangedSubview:[self label:@"管理" size:12 weight:NSFontWeightSemibold color:NSColor.tertiaryLabelColor]];
+    NSTextField *group = [self label:@"管理" size:12 weight:NSFontWeightSemibold color:NSColor.tertiaryLabelColor];
+    group.alignment = NSTextAlignmentLeft;
+    [stack addArrangedSubview:group];
 
     NSArray<NSDictionary *> *items = @[
         @{@"title": @"总览", @"symbol": @"chart.pie"},
@@ -4951,13 +4962,13 @@ static NSImage *CPMenuBarIconImage(void) {
     [button addSubview:iconView];
     [button addSubview:titleLabel];
     [NSLayoutConstraint activateConstraints:@[
-        [iconView.leadingAnchor constraintEqualToAnchor:button.leadingAnchor constant:10],
+        [iconView.leadingAnchor constraintEqualToAnchor:button.leadingAnchor constant:12],
         [iconView.centerYAnchor constraintEqualToAnchor:button.centerYAnchor],
         [iconView.widthAnchor constraintEqualToConstant:16],
         [iconView.heightAnchor constraintEqualToConstant:16],
 
-        [titleLabel.leadingAnchor constraintEqualToAnchor:iconView.trailingAnchor constant:8],
-        [titleLabel.trailingAnchor constraintEqualToAnchor:button.trailingAnchor constant:-8],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:button.leadingAnchor constant:38],
+        [titleLabel.trailingAnchor constraintEqualToAnchor:button.trailingAnchor constant:-10],
         [titleLabel.centerYAnchor constraintEqualToAnchor:button.centerYAnchor],
     ]];
     [self.settingsNavIconViews addObject:iconView];
@@ -4967,6 +4978,8 @@ static NSImage *CPMenuBarIconImage(void) {
 
 - (void)settingsSidebarAction:(NSButton *)sender {
     [self rebuildSettingsPagesSelectingIndex:sender.tag];
+    [self populateControls];
+    [self renderSettingsSectionAtIndex:self.selectedSettingsIndex];
 }
 
 - (void)renderSettingsSectionAtIndex:(NSInteger)selected {
