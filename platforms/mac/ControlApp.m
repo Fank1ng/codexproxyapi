@@ -79,6 +79,16 @@ static NSString *CPFullDateTime(id epochValue) {
     return [formatter stringFromDate:[NSDate dateWithTimeIntervalSince1970:epoch]] ?: @"-";
 }
 
+static NSString *CPShortDateTime(id epochValue) {
+    NSTimeInterval epoch = CPDouble(epochValue);
+    if (epoch <= 0) {
+        return @"-";
+    }
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    formatter.dateFormat = @"MM-dd HH:mm";
+    return [formatter stringFromDate:[NSDate dateWithTimeIntervalSince1970:epoch]] ?: @"-";
+}
+
 static NSDate *CPDateFromString(NSString *dateString) {
     if (!dateString.length) {
         return nil;
@@ -1896,7 +1906,7 @@ static NSImage *CPMenuBarIconImage(void) {
 - (NSView *)totalQuotaCard {
     NSStackView *stack = [[NSStackView alloc] init];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    stack.alignment = NSLayoutAttributeLeading;
+    stack.alignment = NSLayoutAttributeWidth;
     stack.spacing = 8;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [stack.heightAnchor constraintGreaterThanOrEqualToConstant:92].active = YES;
@@ -1973,8 +1983,9 @@ static NSImage *CPMenuBarIconImage(void) {
     bar.doubleValue = MAX(0, MIN(100, progress * 100.0));
     bar.controlSize = NSControlSizeSmall;
     bar.translatesAutoresizingMaskIntoConstraints = NO;
-    [bar.widthAnchor constraintEqualToConstant:136].active = YES;
+    [bar.widthAnchor constraintGreaterThanOrEqualToConstant:120].active = YES;
     [bar setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [bar setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [row addArrangedSubview:bar];
 
     NSTextField *caption = [self labelWithText:captionText ?: @"额度待刷新"
@@ -2350,7 +2361,7 @@ static NSImage *CPMenuBarIconImage(void) {
     scroll.documentView = self.accountTable;
     [listPane addArrangedSubview:scroll];
     [scroll.heightAnchor constraintGreaterThanOrEqualToConstant:228].active = YES;
-    [listPane.widthAnchor constraintEqualToAnchor:panes.widthAnchor multiplier:0.60 constant:-6].active = YES;
+    [listPane.widthAnchor constraintEqualToAnchor:panes.widthAnchor multiplier:0.56 constant:-6].active = YES;
 
     CPThemedView *inspectorPanel = [[CPThemedView alloc] init];
     inspectorPanel.wantsLayer = YES;
@@ -2360,7 +2371,7 @@ static NSImage *CPMenuBarIconImage(void) {
     inspectorPanel.cpBorderColor = NSColor.clearColor;
     inspectorPanel.translatesAutoresizingMaskIntoConstraints = NO;
     [panes addArrangedSubview:inspectorPanel];
-    [inspectorPanel.widthAnchor constraintGreaterThanOrEqualToConstant:220].active = YES;
+    [inspectorPanel.widthAnchor constraintGreaterThanOrEqualToConstant:250].active = YES;
 
     self.compactInspector = YES;
     self.inspectorStack = [[NSStackView alloc] init];
@@ -2369,7 +2380,7 @@ static NSImage *CPMenuBarIconImage(void) {
     self.inspectorStack.spacing = 6;
     self.inspectorStack.translatesAutoresizingMaskIntoConstraints = NO;
     [inspectorPanel addSubview:self.inspectorStack];
-    [self pinView:self.inspectorStack toView:inspectorPanel insets:NSEdgeInsetsMake(2, 10, 2, 0)];
+    [self pinView:self.inspectorStack toView:inspectorPanel insets:NSEdgeInsetsMake(2, 10, 2, 8)];
     [self rebuildInspector];
     return panes;
 }
@@ -3132,17 +3143,19 @@ static NSImage *CPMenuBarIconImage(void) {
     right.toolTip = value;
     [left setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
     [right setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [right setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     [row addSubview:left];
     [row addSubview:right];
     [NSLayoutConstraint activateConstraints:@[
         [left.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
         [left.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [left.widthAnchor constraintEqualToConstant:88],
+        [left.widthAnchor constraintEqualToConstant:76],
 
-        [right.leadingAnchor constraintEqualToAnchor:left.trailingAnchor constant:6],
+        [right.leadingAnchor constraintEqualToAnchor:left.trailingAnchor constant:10],
         [right.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
         [right.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [right.widthAnchor constraintGreaterThanOrEqualToConstant:170],
     ]];
     return row;
 }
@@ -4237,9 +4250,9 @@ static NSImage *CPMenuBarIconImage(void) {
         [self.inspectorStack addArrangedSubview:[self accountInspectorInfoRowWithTitle:@"邮箱" value:CPDisplayString(account[@"email"])]];
         [self.inspectorStack addArrangedSubview:[self accountInspectorInfoRowWithTitle:@"Token" value:CPRelativeTime(account[@"expires_at"])]];
         [self.inspectorStack addArrangedSubview:[self accountInspectorInfoRowWithTitle:@"5h 剩余" value:[self quotaTextForAccountName:CPString(account[@"name"]) weekly:NO]]];
-        [self.inspectorStack addArrangedSubview:[self accountInspectorInfoRowWithTitle:@"5h 刷新" value:[self quotaResetTextForAccountName:CPString(account[@"name"]) weekly:NO]]];
+        [self.inspectorStack addArrangedSubview:[self accountInspectorInfoRowWithTitle:@"5h 刷新" value:[self compactQuotaResetTextForAccountName:CPString(account[@"name"]) weekly:NO]]];
         [self.inspectorStack addArrangedSubview:[self accountInspectorInfoRowWithTitle:@"7d 剩余" value:[self quotaTextForAccountName:CPString(account[@"name"]) weekly:YES]]];
-        [self.inspectorStack addArrangedSubview:[self accountInspectorInfoRowWithTitle:@"7d 刷新" value:[self quotaResetTextForAccountName:CPString(account[@"name"]) weekly:YES]]];
+        [self.inspectorStack addArrangedSubview:[self accountInspectorInfoRowWithTitle:@"7d 刷新" value:[self compactQuotaResetTextForAccountName:CPString(account[@"name"]) weekly:YES]]];
 
         NSStackView *buttonGrid = [[NSStackView alloc] init];
         buttonGrid.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -4394,6 +4407,21 @@ static NSImage *CPMenuBarIconImage(void) {
     return [NSString stringWithFormat:@"%@刷新 %@", prefix, CPFullDateTime(@(resetAt))];
 }
 
+- (NSString *)compactQuotaResetTextForAccountName:(NSString *)name weekly:(BOOL)weekly {
+    NSDictionary *quota = CPDict(self.quotaSnapshot[name]);
+    NSDictionary *rateLimit = CPDict(quota[@"rate_limit"]);
+    NSDictionary *window = CPDict(rateLimit[weekly ? @"secondary_window" : @"primary_window"]);
+    NSTimeInterval resetAt = CPDouble(window[@"reset_at"]);
+    if (resetAt <= 0) {
+        NSTimeInterval fetchedAt = CPDouble(quota[@"_fetched_at"]);
+        NSTimeInterval resetAfter = CPDouble(window[@"reset_after_seconds"]);
+        if (fetchedAt > 0 && resetAfter > 0) {
+            resetAt = fetchedAt + resetAfter;
+        }
+    }
+    return resetAt > 0 ? CPShortDateTime(@(resetAt)) : @"未刷新";
+}
+
 - (NSString *)requestTimeText:(id)value {
     NSTimeInterval epoch = CPDouble(value);
     if (epoch <= 0) {
@@ -4473,7 +4501,7 @@ static NSImage *CPMenuBarIconImage(void) {
     _settingsNavButtons = [NSMutableArray array];
     _settingsNavIconViews = [NSMutableArray array];
     _settingsNavTitleLabels = [NSMutableArray array];
-    _configSnapshot = @{};
+    _configSnapshot = [self defaultConfig];
     _statusSnapshot = @{};
     _codexSnapshot = @{};
     _menubarLoginSnapshot = @{};
@@ -4610,17 +4638,14 @@ static NSImage *CPMenuBarIconImage(void) {
     self.window.delegate = self;
     [self.window center];
 
-    NSStackView *root = [[NSStackView alloc] init];
-    root.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    root.alignment = NSLayoutAttributeHeight;
-    root.spacing = 0;
-    root.edgeInsets = NSEdgeInsetsMake(0, 0, 0, 0);
-    root.translatesAutoresizingMaskIntoConstraints = NO;
+    CPThemedView *root = [[CPThemedView alloc] initWithFrame:frame];
+    root.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    root.wantsLayer = YES;
+    root.cpBackgroundColor = CPSettingsContentBackgroundColor();
     self.window.contentView = root;
 
     NSView *sidebar = [self settingsSidebarView];
-    [root addArrangedSubview:sidebar];
-    [sidebar.widthAnchor constraintEqualToConstant:188].active = YES;
+    [root addSubview:sidebar];
 
     CPThemedView *detailPanel = [[CPThemedView alloc] init];
     detailPanel.wantsLayer = YES;
@@ -4633,9 +4658,19 @@ static NSImage *CPMenuBarIconImage(void) {
         detailPanel.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner;
     }
     detailPanel.translatesAutoresizingMaskIntoConstraints = NO;
-    [root addArrangedSubview:detailPanel];
-    [detailPanel.widthAnchor constraintEqualToConstant:752].active = YES;
+    [root addSubview:detailPanel];
     [detailPanel setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [NSLayoutConstraint activateConstraints:@[
+        [sidebar.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
+        [sidebar.topAnchor constraintEqualToAnchor:root.topAnchor],
+        [sidebar.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
+        [sidebar.widthAnchor constraintEqualToConstant:204],
+
+        [detailPanel.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:188],
+        [detailPanel.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
+        [detailPanel.topAnchor constraintEqualToAnchor:root.topAnchor],
+        [detailPanel.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
+    ]];
 
     NSStackView *detail = [[NSStackView alloc] init];
     detail.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -5397,11 +5432,8 @@ static NSImage *CPMenuBarIconImage(void) {
     header.cpBackgroundColor = CPSettingsHeaderBackgroundColor();
     header.cpBorderColor = NSColor.clearColor;
     header.layer.borderWidth = 0;
-    header.layer.cornerRadius = 16;
-    header.layer.masksToBounds = YES;
-    if (@available(macOS 10.13, *)) {
-        header.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner;
-    }
+    header.layer.cornerRadius = 0;
+    header.layer.masksToBounds = NO;
     header.translatesAutoresizingMaskIntoConstraints = NO;
 
     NSStackView *textStack = [[NSStackView alloc] init];
@@ -5772,8 +5804,6 @@ static NSImage *CPMenuBarIconImage(void) {
     BOOL explicitRefresh = sender != nil;
     if (explicitRefresh) {
         self.statusLabel.stringValue = @"正在读取设置...";
-    } else if (self.statusLabel) {
-        self.statusLabel.stringValue = @"设置已载入，正在同步状态...";
     }
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSDictionary *config = [self fetchJSONPath:@"/api/config" method:@"GET" body:nil timeout:3.0];
@@ -5813,8 +5843,10 @@ static NSImage *CPMenuBarIconImage(void) {
             [self rebuildSettingsPagesSelectingIndex:selected];
             [self populateControls];
             [self renderSettingsSectionAtIndex:selected];
-            [self scrollAllTabsToTopAfterLayout];
-            self.statusLabel.stringValue = @"设置已读取";
+            if (explicitRefresh) {
+                [self scrollAllTabsToTopAfterLayout];
+                self.statusLabel.stringValue = @"设置已读取";
+            }
             [self auditButtonsInWindow:self.window context:@"settings-refresh"];
         });
     });
