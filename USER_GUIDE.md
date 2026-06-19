@@ -2,23 +2,23 @@
 
 这份手册给第一次使用的新用户看。按顺序操作即可。
 
-`小腊肠.app` 是主要管理入口。日常状态、账号、额度和代理确认都在 App 里查看。
+`the little dachshund.app` 是主要管理入口，打开后显示为“小腊肠”。日常状态、账号、额度和代理确认都在 App 里查看。
 
 ## 新 Mac 首次运行
 
 ### 1. 安装 App
 
-打开下载的 DMG，把 `小腊肠.app` 拖到 Applications。
+打开下载的 DMG，把 `the little dachshund.app` 拖到 Applications。
 
 普通/本地签名版本没有 Apple 公证，新 Mac 首次打开时可能会触发 macOS 安全拦截。
 
 ### 2. 打开 App
 
-找到 `小腊肠.app`。
+找到 `the little dachshund.app`。
 
 优先双击打开。如果 macOS 提示“无法验证开发者”或“不明开发者”，按下面方式打开：
 
-1. 右键点击 `小腊肠.app`
+1. 右键点击 `the little dachshund.app`
 2. 选择“打开”
 3. 在弹窗里再次点击“打开”
 
@@ -70,7 +70,7 @@ App 打开后，点击顶部的“启动/修复/更新后台”。
 
 以后使用时，一般只需要：
 
-1. 打开 `小腊肠.app`
+1. 打开 `the little dachshund.app`
 2. 确认“代理状态”为“在线”
 3. 点击“打开 Codex”
 
@@ -86,7 +86,7 @@ App 打开后，点击顶部的“启动/修复/更新后台”。
 
 处理：
 
-- 右键 `小腊肠.app`，选择“打开”
+- 右键 `the little dachshund.app`，选择“打开”
 - 或进入“系统设置” → “隐私与安全性” → “仍要打开”
 
 ### App 打开了，但代理没有运行
@@ -137,7 +137,7 @@ App 会尽量为修改前的配置创建备份。
 清除 macOS 隔离属性：
 
 ```bash
-xattr -cr "/path/to/小腊肠.app"
+xattr -cr "/path/to/the little dachshund.app"
 ```
 
 查看代理日志：

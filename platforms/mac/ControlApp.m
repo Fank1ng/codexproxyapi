@@ -298,11 +298,11 @@ static NSMenuItem *CPWhiteMenuDisplayItem(NSString *title, NSTextField **labelOu
     NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:@"" action:nil keyEquivalent:@""];
     item.enabled = NO;
 
-    NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 420, 24)];
+    NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)];
     NSTextField *label = [NSTextField labelWithString:title ?: @""];
     label.translatesAutoresizingMaskIntoConstraints = NO;
     label.font = [NSFont menuFontOfSize:0];
-    label.textColor = NSColor.whiteColor;
+    label.textColor = NSColor.labelColor;
     label.lineBreakMode = NSLineBreakByTruncatingTail;
     label.maximumNumberOfLines = 1;
     [view addSubview:label];

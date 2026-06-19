@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.7.5 - 2026-06-19
+
+- Fixed the macOS menu bar status and quota rows so light mode uses adaptive system text color.
+- Narrowed the macOS menu bar status rows to 200px without changing row height.
+- Renamed current English-facing app/package labels to the little dachshund.
+
 ## v0.7.4 - 2026-06-17
 
 - Fixed the macOS menu bar status and quota rows by rendering them as white custom menu item views.

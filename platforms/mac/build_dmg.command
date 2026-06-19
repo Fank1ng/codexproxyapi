@@ -3,7 +3,7 @@ set -euo pipefail
 
 MAC_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$MAC_DIR/../.." && pwd)"
-APP_NAME="XiaoLaChang.app"
+APP_NAME="the little dachshund.app"
 BUILD_DIR="$ROOT/build"
 APP_BUILD_DIR="${APP_BUILD_DIR:-${TMPDIR:-/private/tmp}/xiaolachang-build}"
 APP="${APP:-$APP_BUILD_DIR/$APP_NAME}"
@@ -168,7 +168,7 @@ OSA
 APP="$APP" SIGNED_APP="$SIGNED_APP" "$MAC_DIR/build_control_app.command"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
-DMG_NAME="XiaoLaChang-${VERSION}-mac.dmg"
+DMG_NAME="the little dachshund-${VERSION}-mac.dmg"
 VOLNAME="小腊肠 $VERSION"
 DMG_RW="$BUILD_DIR/${DMG_NAME%.dmg}.rw.dmg"
 DMG_TMP="$BUILD_DIR/${DMG_NAME%.dmg}.tmp.dmg"
@@ -204,7 +204,7 @@ chflags hidden "$STAGE/.background" 2>/dev/null || true
 cat > "$STAGE/首次打开说明.txt" <<'TXT'
 小腊肠首次打开说明
 
-1. 把 XiaoLaChang.app 拖到 Applications。App 打开后显示名仍是“小腊肠”。
+1. 把 the little dachshund.app 拖到 Applications。App 打开后显示名仍是“小腊肠”。
 2. 如果 macOS 提示“无法验证开发者”，请右键点击 App，选择“打开”，再在弹窗中确认。
 3. 如果仍被拦截，进入“系统设置” -> “隐私与安全性”，允许打开小腊肠。
 4. 打开 App 后点击“启动/修复”，然后按界面提示添加账号并启用代理。

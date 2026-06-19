@@ -531,13 +531,13 @@ def _app_bundle_dir() -> Path:
     for parent in (source, *source.parents):
         if parent.suffix == ".app" and (parent / "Contents").exists():
             return parent
-    return CONFIG_DIR / "小腊肠.app"
+    return CONFIG_DIR / "the little dachshund.app"
 
 
 def _menubar_program() -> Path:
     app = _app_bundle_dir()
     info = app / "Contents" / "Info.plist"
-    executable = "XiaoLaChang"
+    executable = "the little dachshund"
     if info.exists():
         try:
             with open(info, "rb") as f:

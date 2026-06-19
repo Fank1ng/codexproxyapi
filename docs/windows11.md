@@ -1,4 +1,4 @@
-# Codex Proxy Control Windows 版
+# the little dachshund Windows 版
 
 > Windows 版使用 PyInstaller 生成控制端和后台 supervisor，再用 Inno Setup
 > 生成用户级安装包。根目录里的稳定 macOS 源码和打包脚本保持不动。
@@ -14,9 +14,9 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 脚本会生成：
 
-- `dist\windows\Codex Proxy Control.exe`
+- `dist\windows\the little dachshund.exe`
 - `dist\windows\CodexProxyService.exe`
-- `dist\CodexProxyControlSetup-0.6.7-win-x64.exe`（已安装 Inno Setup 时）
+- `dist\the-little-dachshund-<version>-win-x64.exe`（已安装 Inno Setup 时）
 
 如果只想生成便携文件：
 
@@ -35,7 +35,7 @@ https://github.com/Fank1ng/codexproxyapi/releases/tag/v0.6.7
 安装包默认安装到：
 
 ```text
-%LOCALAPPDATA%\Programs\Codex Proxy Control
+%LOCALAPPDATA%\Programs\the little dachshund
 ```
 
 运行目录和账号数据保存到：
@@ -65,7 +65,7 @@ https://github.com/Fank1ng/codexproxyapi/releases/tag/v0.6.7
 下载标记：
 
 ```powershell
-Unblock-File .\dist\CodexProxyControlSetup-0.6.7-win-x64.exe
+Unblock-File ".\dist\the-little-dachshund-<version>-win-x64.exe"
 ```
 
 如果是 Smart App Control 直接阻止，Windows 通常不会提供单次放行按钮。
@@ -74,7 +74,7 @@ Unblock-File .\dist\CodexProxyControlSetup-0.6.7-win-x64.exe
 - 使用源码方式运行，跳过未签名 exe 安装包。
 - 在 Windows 安全中心关闭 Smart App Control 后再安装。注意关闭后通常不能
   直接重新开启，可能需要重置或重装 Windows。
-- 为 `Codex Proxy Control.exe`、`CodexProxyService.exe` 和安装包使用可信
+- 为 `the little dachshund.exe`、`CodexProxyService.exe` 和安装包使用可信
   代码签名证书签名，这是长期分发给其他机器时推荐的方式。
 
 ## 兜底脚本

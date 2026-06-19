@@ -1,4 +1,4 @@
-"""Minimal Windows control app for Codex Proxy Control."""
+"""Minimal Windows control app for the little dachshund."""
 
 from __future__ import annotations
 
@@ -173,7 +173,7 @@ def powershell_literal(value: str) -> str:
 class ControlApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Codex Proxy Control")
+        self.root.title("the little dachshund")
         self.root.geometry("980x680")
         self.root.minsize(860, 560)
         self.accounts: list[dict] = []
@@ -185,7 +185,7 @@ class ControlApp:
         frame = ttk.Frame(self.root, padding=16)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        title = ttk.Label(frame, text="Codex Proxy Control", font=("Segoe UI", 16, "bold"))
+        title = ttk.Label(frame, text="the little dachshund", font=("Segoe UI", 16, "bold"))
         title.pack(anchor=tk.W)
 
         actions = ttk.Frame(frame)
@@ -335,7 +335,7 @@ class ControlApp:
                 f"Write-Host 'Starting Codex login for account: {safe_name}'; "
                 f"& {powershell_literal(codex_cli)} login; "
                 "Write-Host ''; "
-                "Write-Host 'Login finished. Return to Codex Proxy Control and click Scan Accounts.'"
+                "Write-Host 'Login finished. Return to the little dachshund and click Scan Accounts.'"
             )
             process = subprocess.Popen(
                 [
@@ -559,7 +559,7 @@ class ControlApp:
         self.status_var.set("Error")
         self.output.insert(tk.END, f"ERROR: {message}\n\n")
         self.output.see(tk.END)
-        messagebox.showerror("Codex Proxy Control", message)
+        messagebox.showerror("the little dachshund", message)
 
 
 def main() -> None:

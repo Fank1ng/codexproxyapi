@@ -621,7 +621,7 @@ async def api_control_app_required(request: web.Request) -> web.Response:
     return web.json_response(
         {
             "error": "This action moved to the native Control App so the proxy can stay running.",
-            "use": "小腊肠.app or control_panel.command",
+            "use": "the little dachshund.app or control_panel.command",
         },
         status=410,
     )

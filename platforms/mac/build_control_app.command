@@ -4,10 +4,14 @@ set -euo pipefail
 MAC_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$MAC_DIR/../.." && pwd)"
 CORE_DIR="$MAC_DIR/core"
-APP_LINK="$ROOT/XiaoLaChang.app"
-LEGACY_APP_LINK="$ROOT/小腊肠.app"
-APP="${APP:-$HOME/Applications/XiaoLaChang.app}"
-LEGACY_APP="${LEGACY_APP:-$HOME/Applications/小腊肠.app}"
+APP_BUNDLE_NAME="the little dachshund.app"
+APP_EXECUTABLE="the little dachshund"
+APP_LINK="$ROOT/$APP_BUNDLE_NAME"
+LEGACY_APP_LINK="$ROOT/XiaoLaChang.app"
+LEGACY_CHINESE_APP_LINK="$ROOT/小腊肠.app"
+APP="${APP:-$HOME/Applications/$APP_BUNDLE_NAME}"
+LEGACY_APP="${LEGACY_APP:-$HOME/Applications/XiaoLaChang.app}"
+LEGACY_CHINESE_APP="$HOME/Applications/小腊肠.app"
 RESOURCES="$APP/Contents/Resources"
 RUNTIME="$RESOURCES/runtime"
 VENDOR="$RUNTIME/vendor"
@@ -16,7 +20,7 @@ VERSION_FILE="$ROOT/VERSION"
 APP_VERSION="${APP_VERSION:-$(tr -d '[:space:]' < "$VERSION_FILE")}"
 PYTHON="${PYTHON:-/usr/bin/python3}"
 PYTHON_FRAMEWORK="${PYTHON_FRAMEWORK:-/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework}"
-SIGNED_APP="${SIGNED_APP:-/private/tmp/XiaoLaChang.app}"
+SIGNED_APP="${SIGNED_APP:-/private/tmp/$APP_BUNDLE_NAME}"
 
 clear_bundle_xattrs() {
   local target="$1"
@@ -56,9 +60,11 @@ sign_runtime_components() {
   fi
 }
 
-if [ "$LEGACY_APP" != "$APP" ]; then
-  rm -rf "$LEGACY_APP"
-fi
+for legacy in "$LEGACY_APP" "$LEGACY_CHINESE_APP"; do
+  if [ "$legacy" != "$APP" ]; then
+    rm -rf "$legacy"
+  fi
+done
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$RESOURCES" "$RUNTIME" "$VENDOR"
 
@@ -128,7 +134,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleDevelopmentRegion</key>
   <string>zh_CN</string>
   <key>CFBundleExecutable</key>
-  <string>XiaoLaChang</string>
+  <string>$APP_EXECUTABLE</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
@@ -208,8 +214,8 @@ for package in packages:
         shutil.copy2(src, dst)
 PY
 
-clang -fobjc-arc -framework Cocoa "$MAC_DIR/ControlApp.m" -o "$APP/Contents/MacOS/XiaoLaChang"
-chmod +x "$APP/Contents/MacOS/XiaoLaChang"
+clang -fobjc-arc -framework Cocoa "$MAC_DIR/ControlApp.m" -o "$APP/Contents/MacOS/$APP_EXECUTABLE"
+chmod +x "$APP/Contents/MacOS/$APP_EXECUTABLE"
 
 find "$APP" -name ".DS_Store" -delete
 find "$RUNTIME" \( -name "*.log" -o -name "recent_requests.json" \) -delete
@@ -267,16 +273,21 @@ if [ "$APP" != "$APP_LINK" ]; then
   ln -s "$APP" "$APP_LINK"
   echo "Workspace link: $APP_LINK -> $APP"
 fi
-if [ -L "$LEGACY_APP_LINK" ]; then
-  rm -f "$LEGACY_APP_LINK"
-fi
-SYSTEM_APP_LINK="/Applications/XiaoLaChang.app"
-LEGACY_SYSTEM_APP_LINK="/Applications/小腊肠.app"
+for legacy in "$LEGACY_APP_LINK" "$LEGACY_CHINESE_APP_LINK"; do
+  if [ -L "$legacy" ]; then
+    rm -f "$legacy"
+  fi
+done
+SYSTEM_APP_LINK="/Applications/$APP_BUNDLE_NAME"
+LEGACY_SYSTEM_APP_LINK="/Applications/XiaoLaChang.app"
+LEGACY_CHINESE_SYSTEM_APP_LINK="/Applications/小腊肠.app"
 if [ -d /Applications ] && [ -w /Applications ] && [ "$APP" != "$SYSTEM_APP_LINK" ]; then
   rm -rf "$SYSTEM_APP_LINK"
   ln -s "$APP" "$SYSTEM_APP_LINK"
   echo "Applications link: $SYSTEM_APP_LINK -> $APP"
 fi
-if [ -L "$LEGACY_SYSTEM_APP_LINK" ]; then
-  rm -f "$LEGACY_SYSTEM_APP_LINK"
-fi
+for legacy in "$LEGACY_SYSTEM_APP_LINK" "$LEGACY_CHINESE_SYSTEM_APP_LINK"; do
+  if [ -L "$legacy" ]; then
+    rm -f "$legacy"
+  fi
+done

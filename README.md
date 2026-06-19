@@ -2,26 +2,26 @@
 
 这份手册给第一次使用的新用户看。按顺序操作即可。
 
-`XiaoLaChang.app` 是 macOS 主要管理入口，打开后显示为“小腊肠”。日常状态、账号、额度和代理确认都在 App 里查看。
+`the little dachshund.app` 是 macOS 主要管理入口，打开后显示为“小腊肠”。日常状态、账号、额度和代理确认都在 App 里查看。
 
-macOS 使用 `XiaoLaChang.app`，Windows 11 使用
-`CodexProxyControlSetup-0.6.8-win-x64.exe` 安装控制端。
+macOS 使用 `the little dachshund.app`，Windows 11 使用
+`the-little-dachshund-<version>-win-x64.exe` 安装控制端。
 
 ## Mac 首次运行
 
 ### 1. 安装 App
 
-打开下载的 DMG，把 `XiaoLaChang.app` 拖到 Applications。
+打开下载的 DMG，把 `the little dachshund.app` 拖到 Applications。
 
 普通/本地签名版本没有 Apple 公证，新 Mac 首次打开时可能会触发 macOS 安全拦截。
 
 ### 2. 打开 App
 
-找到 `XiaoLaChang.app`。
+找到 `the little dachshund.app`。
 
 优先双击打开。如果 macOS 提示“无法验证开发者”或“不明开发者”，按下面方式打开：
 
-1. 右键点击 `XiaoLaChang.app`
+1. 右键点击 `the little dachshund.app`
 2. 选择“打开”
 3. 在弹窗里再次点击“打开”
 
@@ -72,7 +72,7 @@ App 打开后，点击顶部的“启动”。
 
 以后使用时，一般只需要：
 
-1. 打开 `XiaoLaChang.app`
+1. 打开 `the little dachshund.app`
 2. 确认“代理状态”为“在线”
 3. 点击“打开 Codex”
 
@@ -87,13 +87,13 @@ App 打开后，点击顶部的“启动”。
 从 GitHub Releases 下载 Windows 安装包：
 
 ```text
-CodexProxyControlSetup-0.6.8-win-x64.exe
+the-little-dachshund-<version>-win-x64.exe
 ```
 
 安装包默认安装到：
 
 ```text
-%LOCALAPPDATA%\Programs\Codex Proxy Control
+%LOCALAPPDATA%\Programs\the little dachshund
 ```
 
 运行目录、账号和日志保存到：
@@ -112,7 +112,7 @@ CodexProxyControlSetup-0.6.8-win-x64.exe
 如果文件是从浏览器下载的，可以在 PowerShell 中解除下载标记：
 
 ```powershell
-Unblock-File .\CodexProxyControlSetup-0.6.8-win-x64.exe
+Unblock-File ".\the-little-dachshund-<version>-win-x64.exe"
 ```
 
 如果 Smart App Control 直接阻止运行，Windows 通常不会提供单次放行按钮。
@@ -120,7 +120,7 @@ Unblock-File .\CodexProxyControlSetup-0.6.8-win-x64.exe
 
 ### 3. 启动代理
 
-打开 `Codex Proxy Control`，点击 `Start / Repair`。
+打开 `the little dachshund`，点击 `Start / Repair`。
 
 它会完成：
 
@@ -143,7 +143,7 @@ $env:CODEX_HOME='...\accounts\name'; & 'codex' login
 
 随后 Codex CLI 会打开浏览器登录页。请在浏览器中完成 OpenAI/Codex 登录。
 
-登录完成后回到 `Codex Proxy Control`，点击 `Scan Accounts`。账号出现在列表中后，
+登录完成后回到 `the little dachshund`，点击 `Scan Accounts`。账号出现在列表中后，
 即可参与代理轮换。
 
 如果这台 Windows 机器上已经有当前 Codex 登录态，可以点击 `Import Current`
@@ -193,7 +193,7 @@ http://127.0.0.1:8800
 
 处理：
 
-- 右键 `小腊肠.app`，选择“打开”
+- 右键 `the little dachshund.app`，选择“打开”
 - 或进入“系统设置” → “隐私与安全性” → “仍要打开”
 
 ### App 打开了，但代理没有运行
@@ -244,7 +244,7 @@ App 会尽量为修改前的配置创建备份。
 清除 macOS 隔离属性：
 
 ```bash
-xattr -cr "/path/to/小腊肠.app"
+xattr -cr "/path/to/the little dachshund.app"
 ```
 
 查看代理日志：
@@ -381,7 +381,7 @@ quota.json
 DMG 会输出到：
 
 ```text
-dist/XiaoLaChang-<version>-mac.dmg
+dist/the little dachshund-<version>-mac.dmg
 ```
 
 当前包使用本地/ad-hoc 签名，未 notarize。首次打开时，用户可能需要右键 App 并选择“打开”。构建脚本会拒绝把 `auth.json` 或 `accounts/` 账号目录打进 App 包。

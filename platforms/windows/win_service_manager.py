@@ -1,4 +1,4 @@
-"""Windows Scheduled Task helpers for Codex Proxy Control."""
+"""Windows Scheduled Task helpers for the little dachshund."""
 
 from __future__ import annotations
 

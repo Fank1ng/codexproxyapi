@@ -46,6 +46,7 @@ function Assert-CleanPackageTree {
         $_.Name -eq ".env" -or
         $_.Name -eq "quota.json" -or
         $_.Extension -eq ".docx" -or
+        $_.FullName -match "\\the little dachshund\.app(\\|$)" -or
         $_.FullName -match "\\Codex Proxy Control\.app(\\|$)" -or
         $_.FullName -match "\\runtime\\python(\\|$)" -or
         $_.FullName -match "\\accounts\\[^\\]+\\auth\.json$"
@@ -77,7 +78,7 @@ if (-not $SkipPip) {
     --clean `
     --onefile `
     --windowed `
-    --name "Codex Proxy Control" `
+    --name "the little dachshund" `
     --icon $IconPath `
     --distpath $Dist `
     --workpath (Join-Path $Build "control") `
