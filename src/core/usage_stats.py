@@ -22,6 +22,7 @@ RETENTION_DAYS = 371
 COUNTING_POLICY = "proxy_captured_usage"
 COUNTING_POLICY_DETAIL = (
     "Local proxy-captured usage from upstream response payloads. "
+    "Displayed totals add captured cache tokens to approximate the official heatmap. "
     "Requests that did not expose usage are counted as unknown and do not add tokens."
 )
 COUNTER_KEYS = (
@@ -34,6 +35,7 @@ COUNTER_KEYS = (
     "cache_creation_tokens",
     "cache_tokens_observed_requests",
     "reasoning_tokens_observed_requests",
+    "raw_total_tokens",
     "total_tokens",
     "requests",
     "unknown_requests",
@@ -804,6 +806,7 @@ def _where_clause(*, account: str = "", model: str = "", since: Optional[float] 
 
 
 def _row_counter(row: sqlite3.Row) -> dict:
+    total_tokens = int(row["total_tokens"] or 0)
     return {
         "input_tokens": int(row["input_tokens"] or 0),
         "output_tokens": int(row["output_tokens"] or 0),
@@ -814,7 +817,8 @@ def _row_counter(row: sqlite3.Row) -> dict:
         "cache_creation_tokens": int(row["cache_creation_tokens"] or 0),
         "cache_tokens_observed_requests": int(row["cache_tokens_observed_requests"] or 0),
         "reasoning_tokens_observed_requests": int(row["reasoning_tokens_observed_requests"] or 0),
-        "total_tokens": int(row["total_tokens"] or 0),
+        "raw_total_tokens": total_tokens,
+        "total_tokens": total_tokens,
         "requests": int(row["requests"] or 0),
         "unknown_requests": int(row["unknown_requests"] or 0),
     }
@@ -835,6 +839,19 @@ def _cache_value(row: Any) -> int:
     if cache_read or cache_creation:
         return cache_read + cache_creation
     return max(int(_value(row, "cached_tokens") or 0), int(_value(row, "cache_tokens") or 0))
+
+
+def _official_like_total(row: Any) -> int:
+    raw_total = _value(row, "raw_total_tokens")
+    if raw_total is None:
+        raw_total = _value(row, "total_tokens")
+    return int(raw_total or 0) + _cache_value(row)
+
+
+def _apply_official_like_total(counter: dict) -> dict:
+    counter["raw_total_tokens"] = int(counter.get("raw_total_tokens") or counter.get("total_tokens") or 0)
+    counter["total_tokens"] = _official_like_total(counter)
+    return counter
 
 
 def _capture_state(observed: bool, value: int) -> str:
@@ -939,9 +956,9 @@ def summary(
     except sqlite3.Error as e:
         logger.warning("failed to summarize token usage history: %s", e)
     return {
-        "daily": [daily[key] for key in daily_keys],
-        "weekly": [weekly[key] for key in weekly_keys],
-        "total": total,
+        "daily": [_apply_official_like_total(daily[key]) for key in daily_keys],
+        "weekly": [_apply_official_like_total(weekly[key]) for key in weekly_keys],
+        "total": _apply_official_like_total(total),
         "last_recorded_at": last_recorded_at,
         "storage": "sqlite",
         "history_available": True,
@@ -1008,7 +1025,8 @@ def events(
                     bool(row["reasoning_tokens_observed"]),
                     int(row["reasoning_tokens"] or 0),
                 ),
-                "total_tokens": int(row["total_tokens"] or 0),
+                "raw_total_tokens": int(row["total_tokens"] or 0),
+                "total_tokens": _official_like_total(row),
                 "latency_ms": row["latency_ms"],
                 "ttft_ms": row["ttft_ms"],
                 "requested_model": row["requested_model"] or "",

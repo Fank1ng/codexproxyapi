@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.7.7 - 2026-06-20
+
+- Changed token activity totals to add captured cache tokens, matching the official heatmap more closely while preserving raw historical totals.
+
 ## v0.7.6 - 2026-06-20
 
 - Fixed the macOS menu bar login item so it detects stale app paths, rewrites the LaunchAgent when needed, and stays resident after login.

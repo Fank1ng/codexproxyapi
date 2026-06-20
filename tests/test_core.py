@@ -746,6 +746,35 @@ class UsageStatsTests(unittest.TestCase):
         self.assertEqual(observed["req-observed-cache"]["cache_capture_state"], "observed_value")
         self.assertEqual(observed["req-observed-cache"]["reasoning_capture_state"], "observed_value")
 
+    def test_usage_summary_displays_official_like_total_without_rewriting_history(self):
+        stats_file = Path(tempfile.mkdtemp()) / "usage_stats.json"
+        history_db = Path(tempfile.mkdtemp()) / "usage_history.sqlite"
+        with mock.patch.object(usage_stats, "USAGE_STATS_FILE", stats_file), \
+             mock.patch.object(usage_stats, "USAGE_HISTORY_DB", history_db):
+            record_request_usage(
+                request_id="req-cache-heavy",
+                account="a",
+                path="/v1/responses",
+                usage={
+                    "input_tokens": 10605540,
+                    "output_tokens": 32483,
+                    "total_tokens": 10638023,
+                    "cached_tokens": 9622912,
+                    "cache_tokens": 9622912,
+                    "cache_tokens_observed": True,
+                },
+            )
+            summary = usage_stats.summary()
+            row = usage_stats.events(limit=1)["events"][0]
+            with sqlite3.connect(history_db) as conn:
+                raw_total = conn.execute("SELECT total_tokens FROM usage_events").fetchone()[0]
+
+        self.assertEqual(summary["total"]["raw_total_tokens"], 10638023)
+        self.assertEqual(summary["total"]["total_tokens"], 20260935)
+        self.assertEqual(row["raw_total_tokens"], 10638023)
+        self.assertEqual(row["total_tokens"], 20260935)
+        self.assertEqual(raw_total, 10638023)
+
     def test_legacy_usage_json_imports_idempotently(self):
         root = Path(tempfile.mkdtemp())
         stats_file = root / "usage_stats.json"
@@ -920,7 +949,8 @@ class UsageStatsTests(unittest.TestCase):
             row = usage_stats.events(limit=1)["events"][0]
 
         self.assertEqual(row["cache_read_tokens"], 3)
-        self.assertEqual(row["total_tokens"], 6)
+        self.assertEqual(row["raw_total_tokens"], 6)
+        self.assertEqual(row["total_tokens"], 9)
         self.assertTrue(diag["observed_columns_ok"])
         self.assertEqual(row["cache_capture_state"], "missing")
 
